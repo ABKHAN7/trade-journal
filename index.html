@@ -157,12 +157,12 @@ function TradeCard({ e, onEdit, onDel }) {
   );
 }
 function WdCard({ e, onDel }) {
-  const w = e.raw;
+  const w = e.raw, dep = w.type === "deposit", col = dep ? C.green : C.amber;
   return (
-    <div style={{ background:C.amber + "10", border:"1px solid " + C.amber + "40", borderLeft:"3px solid " + C.amber, borderRadius:8, padding:"8px 12px", marginBottom:6 }}>
+    <div style={{ background:col + "10", border:"1px solid " + col + "40", borderLeft:"3px solid " + col, borderRadius:8, padding:"8px 12px", marginBottom:6 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:8 }}><span style={{ color:C.amber, fontWeight:700, fontSize:12 }}>⤓ WITHDRAWAL</span><span style={{ color:C.dim, fontSize:11 }}>{w.date}</span></div>
-        <div style={{ textAlign:"right" }}><div style={{ color:C.amber, fontWeight:700, fontSize:14 }}>−${fmt(w.amount)}</div><div style={{ color:C.dim, fontSize:10 }}>bal ${fmt(e.balanceAfter,0)}</div></div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}><span style={{ color:col, fontWeight:700, fontSize:12 }}>{dep ? "⤒ DEPOSIT" : "⤓ WITHDRAWAL"}</span><span style={{ color:C.dim, fontSize:11 }}>{w.date}</span></div>
+        <div style={{ textAlign:"right" }}><div style={{ color:col, fontWeight:700, fontSize:14 }}>{dep ? "+" : "−"}${fmt(w.amount)}</div><div style={{ color:C.dim, fontSize:10 }}>bal ${fmt(e.balanceAfter,0)}</div></div>
       </div>
       {w.note && <div style={{ color:C.dim, fontSize:11, marginTop:3, fontStyle:"italic" }}>“{w.note}”</div>}
       <div style={{ marginTop:6 }}><button onClick={() => onDel(w.id)} style={miniBtn(C.red)}>DELETE</button></div>
@@ -219,7 +219,7 @@ function TradeJournal({ session, onSignOut }) {
   const [syncing, setSyncing] = useState(false);
   const [collapsed, setCollapsed] = useState({});
   const [form, setForm] = useState(emptyForm());
-  const [wd, setWd] = useState({ date: new Date().toISOString().slice(0, 10), amount: "", note: "" });
+  const [wd, setWd] = useState({ date: new Date().toISOString().slice(0, 10), amount: "", note: "", type: "deposit" });
   const [pane, setPane] = useState("trade");
   const [editId, setEditId] = useState(null);
 
@@ -257,7 +257,7 @@ function TradeJournal({ session, onSignOut }) {
   };
   const editTrade = (t) => { setForm({ ...emptyForm(t.pair, t.analyst), ...t }); setEditId(t.id); setPane("trade"); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const deleteTrade = async (id) => { setSyncing(true); await sb.from("trades").delete().eq("id", id); if (editId === id) { setEditId(null); setForm(emptyForm(form.pair, form.analyst)); } await fetchAll(); setSyncing(false); };
-  const saveWd = async () => { const amt = parseFloat(wd.amount); if (!isFinite(amt) || amt <= 0) return; const id = Date.now(); setSyncing(true); await sb.from("withdrawals").upsert({ id, data: { ...wd, amount: amt, id } }); setWd({ date: new Date().toISOString().slice(0, 10), amount: "", note: "" }); await fetchAll(); setSyncing(false); };
+  const saveWd = async () => { const amt = parseFloat(wd.amount); if (!isFinite(amt) || amt <= 0) return; const id = Date.now(); setSyncing(true); await sb.from("withdrawals").upsert({ id, data: { ...wd, amount: amt, id } }); setWd({ date: new Date().toISOString().slice(0, 10), amount: "", note: "", type: wd.type }); await fetchAll(); setSyncing(false); };
   const deleteWd = async (id) => { setSyncing(true); await sb.from("withdrawals").delete().eq("id", id); await fetchAll(); setSyncing(false); };
 
   const model = useMemo(() => {
@@ -265,12 +265,12 @@ function TradeJournal({ session, onSignOut }) {
       ...trades.map((t) => ({ kind: "trade", date: t.date, id: t.id, raw: t, calc: compute(t) })),
       ...withdrawals.map((w) => ({ kind: "wd", date: w.date, id: w.id, raw: w })),
     ].filter((e) => e.kind === "wd" || e.calc).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
-    let bal = startBalance, tradeCum = 0, peak = startBalance, maxDD = 0, withdrawnTot = 0;
+    let bal = startBalance, tradeCum = 0, peak = startBalance, maxDD = 0, withdrawnTot = 0, depositedTot = 0;
     let wins = 0, losses = 0, be = 0, pl = 0, rSum = 0, rrSum = 0, rrCount = 0;
     const equity = [{ x: 0, y: startBalance }], gmap = new Map(); const byAnalyst = {};
     events.forEach((e, i) => {
       const before = bal, key = periodKey(e.date, groupBy);
-      if (!gmap.has(key)) gmap.set(key, { key, label: periodLabel(key, groupBy), items: [], trades: 0, wins: 0, losses: 0, be: 0, pl: 0, withdrawn: 0, openBal: before });
+      if (!gmap.has(key)) gmap.set(key, { key, label: periodLabel(key, groupBy), items: [], trades: 0, wins: 0, losses: 0, be: 0, pl: 0, withdrawn: 0, deposited: 0, openBal: before });
       const g = gmap.get(key);
       if (e.kind === "trade") {
         const c = e.calc;
@@ -285,7 +285,8 @@ function TradeJournal({ session, onSignOut }) {
         if (w) ba.w++; else if (l) ba.l++; else ba.be++;
         const perf = startBalance + tradeCum;
         peak = Math.max(peak, perf); maxDD = Math.max(maxDD, peak - perf);
-      } else { bal -= e.raw.amount; withdrawnTot += e.raw.amount; g.withdrawn += e.raw.amount; }
+      } else if (e.raw.type === "deposit") { bal += e.raw.amount; depositedTot += e.raw.amount; g.deposited += e.raw.amount; }
+      else { bal -= e.raw.amount; withdrawnTot += e.raw.amount; g.withdrawn += e.raw.amount; }
       g.items.push({ ...e, balanceAfter: bal });
       equity.push({ x: i + 1, y: bal });
     });
@@ -293,7 +294,7 @@ function TradeJournal({ session, onSignOut }) {
     groups.forEach((g) => g.items.sort((a, b) => (a.date < b.date ? 1 : b.id - a.id)));
     const decided = wins + losses;
     const analysts = Object.values(byAnalyst).map((a) => ({ ...a, winRate: a.w + a.l ? (a.w / (a.w + a.l)) * 100 : 0, exp: a.n ? a.r / a.n : 0 })).sort((a, b) => b.pl - a.pl);
-    return { balance: bal, pl, wins, losses, be, withdrawnTot, winRate: decided ? (wins / decided) * 100 : 0, avgRR: rrCount ? rrSum / rrCount : 0, expectancy: trades.length ? rSum / trades.length : 0, maxDD, maxDDpct: peak ? (maxDD / peak) * 100 : 0, equity, groups, count: trades.length, analysts };
+    return { balance: bal, pl, wins, losses, be, withdrawnTot, depositedTot, winRate: decided ? (wins / decided) * 100 : 0, avgRR: rrCount ? rrSum / rrCount : 0, expectancy: trades.length ? rSum / trades.length : 0, maxDD, maxDDpct: peak ? (maxDD / peak) * 100 : 0, equity, groups, count: trades.length, analysts };
   }, [trades, withdrawals, startBalance, groupBy]);
 
   const toggle = (k) => setCollapsed((c) => ({ ...c, [k]: !c[k] }));
@@ -356,7 +357,7 @@ function TradeJournal({ session, onSignOut }) {
         </div>
 
         <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, marginBottom:14 }}>
-          <Stat label="BALANCE" value={"$" + fmt(model.balance)} sub={"start $" + fmt(startBalance,0) + " · withdrawn $" + fmt(model.withdrawnTot,0)} color={model.balance >= startBalance ? C.green : C.red} big />
+          <Stat label="BALANCE" value={"$" + fmt(model.balance)} sub={"start $" + fmt(startBalance,0) + " · in $" + fmt(model.depositedTot,0) + " · out $" + fmt(model.withdrawnTot,0)} color={model.balance >= startBalance ? C.green : C.red} big />
           <Stat label="NET TRADING P/L" value={(model.pl >= 0 ? "+" : "−") + "$" + fmt(Math.abs(model.pl))} color={model.pl >= 0 ? C.green : C.red} big />
           <Stat label="WIN RATE" value={fmt(model.winRate,1) + "%"} sub={model.wins + "W · " + model.losses + "L · " + model.be + "BE"} color={C.text} />
           <Stat label="EXPECTANCY" value={(model.expectancy >= 0 ? "+" : "") + fmt(model.expectancy) + "R"} sub="avg per trade" color={model.expectancy >= 0 ? C.green : C.red} />
@@ -386,7 +387,7 @@ function TradeJournal({ session, onSignOut }) {
 
         <div style={{ display:"flex", gap:8, marginBottom: pane ? 8 : 14 }}>
           <button onClick={() => setPane(pane === "trade" ? null : "trade")} style={{ flex:1, background: pane==="trade"?C.panel:C.panel2, border:"1px solid " + (pane==="trade"?C.blue:C.line), color:C.text, padding:"10px", borderRadius:8, fontSize:13, fontWeight:700 }}>{editId ? "▲ EDIT TRADE" : "＋ TRADE"}</button>
-          <button onClick={() => setPane(pane === "wd" ? null : "wd")} style={{ flex:1, background: pane==="wd"?C.panel:C.panel2, border:"1px solid " + (pane==="wd"?C.amber:C.line), color:C.amber, padding:"10px", borderRadius:8, fontSize:13, fontWeight:700 }}>⤓ WITHDRAWAL</button>
+          <button onClick={() => setPane(pane === "wd" ? null : "wd")} style={{ flex:1, background: pane==="wd"?C.panel:C.panel2, border:"1px solid " + (pane==="wd"?C.amber:C.line), color:C.amber, padding:"10px", borderRadius:8, fontSize:13, fontWeight:700 }}>± CASH IN / OUT</button>
         </div>
 
         {pane === "trade" && (
@@ -442,15 +443,21 @@ function TradeJournal({ session, onSignOut }) {
           </div>
         )}
 
-        {pane === "wd" && (
-          <div style={{ background:C.panel, border:"1px solid " + C.amber + "33", borderRadius:10, padding:14, marginBottom:16 }}>
-            <div style={{ color:C.amber, fontSize:11, letterSpacing:"1px", marginBottom:10 }}>RECORD WITHDRAWAL — reduces balance; next period reports from the lower baseline.</div>
+        {pane === "wd" && (() => {
+          const dep = wd.type === "deposit", col = dep ? C.green : C.amber, valid = parseFloat(wd.amount) > 0 && !syncing;
+          return (
+          <div style={{ background:C.panel, border:"1px solid " + col + "33", borderRadius:10, padding:14, marginBottom:16 }}>
+            <div style={{ display:"flex", gap:4, background:C.bg, border:"1px solid " + C.line, borderRadius:6, padding:3, marginBottom:10 }}>
+              {[["deposit","⤒ Deposit"],["withdrawal","⤓ Withdrawal"]].map(([v,lbl]) => <button key={v} onClick={() => setWd({ ...wd, type: v })} style={{ flex:1, background: wd.type===v?C.panel2:"transparent", color: wd.type===v?(v==="deposit"?C.green:C.amber):C.dim, border:"none", padding:"7px", borderRadius:4, fontSize:12, fontWeight: wd.type===v?700:400 }}>{lbl}</button>)}
+            </div>
+            <div style={{ color:col, fontSize:11, letterSpacing:"0.5px", marginBottom:10 }}>{dep ? "ADD CAPITAL — increases balance (initial funding or top-up)." : "WITHDRAW — reduces balance; next period reports from the lower baseline."}</div>
             <Row><Field label="DATE"><input type="date" value={wd.date} onChange={(e) => setWd({ ...wd, date: e.target.value })} style={inp()} /></Field>
               <Field label="AMOUNT ($)"><input type="number" step="any" value={wd.amount} onChange={(e) => setWd({ ...wd, amount: e.target.value })} placeholder="200" style={inp()} /></Field></Row>
-            <Field label="NOTE (optional)"><input value={wd.note} onChange={(e) => setWd({ ...wd, note: e.target.value })} placeholder="profit split, monthly payout" style={inp()} /></Field>
-            <button onClick={saveWd} disabled={!(parseFloat(wd.amount) > 0) || syncing} style={{ width:"100%", marginTop:6, background: parseFloat(wd.amount) > 0 && !syncing ? C.amber : C.line, color: parseFloat(wd.amount) > 0 && !syncing ? "#2a1c02" : C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>{syncing ? "Saving…" : "RECORD WITHDRAWAL"}</button>
+            <Field label="NOTE (optional)"><input value={wd.note} onChange={(e) => setWd({ ...wd, note: e.target.value })} placeholder={dep ? "initial deposit, top-up" : "profit split, monthly payout"} style={inp()} /></Field>
+            <button onClick={saveWd} disabled={!valid} style={{ width:"100%", marginTop:6, background: valid ? col : C.line, color: valid ? (dep?"#06251a":"#2a1c02") : C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>{syncing ? "Saving…" : (dep ? "RECORD DEPOSIT" : "RECORD WITHDRAWAL")}</button>
           </div>
-        )}
+          );
+        })()}
 
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
           <div style={{ display:"flex", gap:4, background:C.panel, border:"1px solid " + C.line, borderRadius:8, padding:3 }}>
@@ -475,7 +482,7 @@ function TradeJournal({ session, onSignOut }) {
                 <span style={{ color:C.dim, fontSize:12, transform: isOpen ? "rotate(90deg)" : "none", transition:"transform .15s" }}>▶</span>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontWeight:700, fontSize:13 }}>{g.label}</div>
-                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>{g.trades} trade{g.trades!==1?"s":""} · <span style={{ color:C.green }}>{g.wins}W</span> <span style={{ color:C.red }}>{g.losses}L</span>{g.be?" " + g.be + "BE":""}{g.withdrawn>0 && <span style={{ color:C.amber }}> · ⤓ ${fmt(g.withdrawn,0)}</span>}</div>
+                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>{g.trades} trade{g.trades!==1?"s":""} · <span style={{ color:C.green }}>{g.wins}W</span> <span style={{ color:C.red }}>{g.losses}L</span>{g.be?" " + g.be + "BE":""}{g.deposited>0 && <span style={{ color:C.green }}> · ⤒ ${fmt(g.deposited,0)}</span>}{g.withdrawn>0 && <span style={{ color:C.amber }}> · ⤓ ${fmt(g.withdrawn,0)}</span>}</div>
                 </div>
                 <div style={{ textAlign:"right" }}>
                   <div style={{ color:pc, fontWeight:700, fontSize:14 }}>{g.pl >= 0 ? "+" : "−"}${fmt(Math.abs(g.pl))}</div>
