@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Trade Journal</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Archivo:wght@600;800&display=swap');
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #0a0d10; }
+  input, select { font-family: 'JetBrains Mono', monospace; }
+  input:focus, select:focus { outline: 1px solid #5aa9e6; }
+  ::placeholder { color: #6f7e8a; }
+  button { cursor: pointer; font-family: 'JetBrains Mono', monospace; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+// ---------- persistent storage via localStorage ----------
+const loadLS = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } };
+const saveLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+const INSTRUMENTS = {
+  "XAU/USD (Gold)": { pip: 0.1, valuePerLot: 10 },
+  "EUR/USD": { pip: 0.0001, valuePerLot: 10 },
+  "GBP/USD": { pip: 0.0001, valuePerLot: 10 },
+  "AUD/USD": { pip: 0.0001, valuePerLot: 10 },
+  "NZD/USD": { pip: 0.0001, valuePerLot: 10 },
+  "USD/JPY": { pip: 0.01, valuePerLot: 6.7 },
+  "EUR/JPY": { pip: 0.01, valuePerLot: 6.7 },
+  "GBP/JPY": { pip: 0.01, valuePerLot: 6.7 },
+  Custom: { pip: 0.0001, valuePerLot: 10 },
+};
+const ANALYSTS = ["Usama", "Meower", "Other"];
+
+const fmt = (n, d = 2) => isFinite(n) ? n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
+
+const emptyForm = (pair = "XAU/USD (Gold)", analyst = "Usama") => ({
+  date: new Date().toISOString().slice(0, 10),
+  analyst, pair,
+  style: analyst === "Meower" ? "simple" : "scaled",
+  entry: "", sl: "", lots: "", pipValue: INSTRUMENTS[pair].valuePerLot,
+  tp: "", outcome: "TP Hit", exit: "",
+  riskFree: "", tp1: "", tp2: "", splitA: 50, splitB: 25, splitC: 25, scaledOutcome: "Full", exitS: "",
+  note: "",
+});
+
+function compute(t) {
+  const inst = INSTRUMENTS[t.pair] || INSTRUMENTS.Custom;
+  const entry = parseFloat(t.entry), sl = parseFloat(t.sl), lots = parseFloat(t.lots), pv = parseFloat(t.pipValue);
+  if ([entry, sl, lots, pv].some((v) => !isFinite(v))) return null;
+  const riskPips = Math.abs(entry - sl) / inst.pip;
+  const dollarRisk = riskPips * pv * lots;
+  if (riskPips <= 0) return null;
+
+  if (t.style === "scaled") {
+    const rf = parseFloat(t.riskFree), tp1 = parseFloat(t.tp1), tp2 = parseFloat(t.tp2);
+    if ([rf, tp1, tp2].some((v) => !isFinite(v))) return null;
+    const dir = tp2 >= entry ? 1 : -1;
+    const A = (parseFloat(t.splitA) || 0) / 100, B = (parseFloat(t.splitB) || 0) / 100, Cc = (parseFloat(t.splitC) || 0) / 100;
+    const rfPips = Math.abs(rf - entry) / inst.pip, tp1Pips = Math.abs(tp1 - entry) / inst.pip, tp2Pips = Math.abs(tp2 - entry) / inst.pip;
+    const gA = rfPips * pv * lots * A, gB = tp1Pips * pv * lots * B, gC = tp2Pips * pv * lots * Cc;
+    let result = 0;
+    if (t.scaledOutcome === "Full SL") result = -dollarRisk;
+    else if (t.scaledOutcome === "Risk-free") result = gA;
+    else if (t.scaledOutcome === "TP1") result = gA + gB;
+    else if (t.scaledOutcome === "Full") result = gA + gB + gC;
+    else if (t.scaledOutcome === "Manual") { const ex = parseFloat(t.exitS); if (isFinite(ex)) result = ((ex - entry) / inst.pip) * dir * pv * lots; }
+    const plannedRR = tp2Pips / riskPips;
+    const blendedFullR = (rfPips * A + tp1Pips * B + tp2Pips * Cc) / riskPips;
+    const slValid = dir === 1 ? sl < entry && rf > entry && tp1 > entry && tp2 >= tp1 : sl > entry && rf < entry && tp1 < entry && tp2 <= tp1;
+    return { dir, riskPips, dollarRisk, result, rMultiple: dollarRisk > 0 ? result / dollarRisk : 0, plannedRR, blendedFullR, slValid, scaled: true };
+  }
+
+  const tp = parseFloat(t.tp);
+  if (!isFinite(tp)) return null;
+  const dir = tp >= entry ? 1 : -1;
+  const rewardPips = Math.abs(tp - entry) / inst.pip;
+  const plannedRR = rewardPips / riskPips;
+  const dollarReward = rewardPips * pv * lots;
+  const slValid = dir === 1 ? sl < entry : sl > entry;
+  let result = 0;
+  if (t.outcome === "TP Hit") result = dollarReward;
+  else if (t.outcome === "SL Hit") result = -dollarRisk;
+  else if (t.outcome === "Breakeven") result = 0;
+  else if (t.outcome === "Manual") { const ex = parseFloat(t.exit); if (isFinite(ex)) result = ((ex - entry) / inst.pip) * dir * pv * lots; }
+  return { dir, riskPips, dollarRisk, dollarReward, result, rMultiple: dollarRisk > 0 ? result / dollarRisk : 0, plannedRR, slValid, scaled: false };
+}
+
+function periodKey(dateStr, mode) {
+  const d = new Date(dateStr + "T00:00:00");
+  if (mode === "day") return dateStr;
+  if (mode === "month") return dateStr.slice(0, 7);
+  const day = d.getDay(), diff = day === 0 ? -6 : 1 - day, m = new Date(d);
+  m.setDate(d.getDate() + diff);
+  return m.toISOString().slice(0, 10);
+}
+function periodLabel(key, mode) {
+  if (mode === "month") return new Date(key + "-01T00:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  if (mode === "day") return new Date(key + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+  const s = new Date(key + "T00:00:00"), e = new Date(s); e.setDate(s.getDate() + 6);
+  const f = (x) => x.toLocaleDateString("en-US", { day: "2-digit", month: "short" });
+  return "Week of " + f(s) + " – " + f(e);
+}
+
+const C = { bg:"#0a0d10", panel:"#11161b", panel2:"#161d24", line:"#222c35", text:"#dfe7ec", dim:"#6f7e8a", green:"#36d399", red:"#f76d77", amber:"#e8b04b", blue:"#5aa9e6", purple:"#b48ce8" };
+const inp = (border) => ({ width:"100%", background:C.bg, border:"1px solid " + (border || C.line), color:C.text, padding:"9px 10px", borderRadius:6, fontSize:13 });
+const miniBtn = (col) => ({ background:"transparent", border:"1px solid " + C.line, color:col, padding:"4px 10px", borderRadius:5, fontSize:10, letterSpacing:"0.5px" });
+
+function Field({ label, children }) { return <div style={{ flex:1, marginBottom:10 }}><div style={{ color:C.dim, fontSize:10, letterSpacing:"1px", marginBottom:4 }}>{label}</div>{children}</div>; }
+function Row({ children }) { return <div style={{ display:"flex", gap:10 }}>{children}</div>; }
+function Stat({ label, value, sub, color, big }) {
+  return <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:"12px 14px" }}><div style={{ color:C.dim, fontSize:9.5, letterSpacing:"1px", marginBottom:4 }}>{label}</div><div style={{ color, fontWeight:700, fontSize: big ? 22 : 18, lineHeight:1.1 }}>{value}</div>{sub && <div style={{ color:C.dim, fontSize:10, marginTop:2 }}>{sub}</div>}</div>;
+}
+function TradeCard({ e, onEdit, onDel }) {
+  const c = e.calc, t = e.raw, rc = c.result > 0 ? C.green : c.result < 0 ? C.red : C.dim;
+  const ac = t.analyst === "Usama" ? C.blue : t.analyst === "Meower" ? C.purple : C.dim;
+  return (
+    <div style={{ background:C.panel, border:"1px solid " + C.line, borderLeft:"3px solid " + rc, borderRadius:8, padding:"10px 12px", marginBottom:6 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+          {t.analyst && <span style={{ fontSize:10, padding:"2px 6px", borderRadius:4, background:ac + "22", color:ac, fontWeight:700 }}>{t.analyst}</span>}
+          <span style={{ fontWeight:700, fontSize:13 }}>{t.pair.replace(" (Gold)","")}</span>
+          <span style={{ fontSize:10, padding:"2px 6px", borderRadius:4, background: c.dir===1?"rgba(54,211,153,.15)":"rgba(247,109,119,.15)", color: c.dir===1?C.green:C.red }}>{c.dir===1?"LONG":"SHORT"}</span>
+          <span style={{ color:C.dim, fontSize:11 }}>{t.date}</span>
+        </div>
+        <div style={{ textAlign:"right" }}>
+          <div style={{ color:rc, fontWeight:700, fontSize:15 }}>{c.result >= 0 ? "+" : "−"}${fmt(Math.abs(c.result))}</div>
+          <div style={{ color:rc, fontSize:10 }}>{c.rMultiple >= 0 ? "+" : ""}{fmt(c.rMultiple)}R · bal ${fmt(e.balanceAfter,0)}</div>
+        </div>
+      </div>
+      <div style={{ display:"flex", flexWrap:"wrap", gap:"2px 14px", fontSize:11, color:C.dim }}>
+        <span>E {t.entry}</span><span>SL {t.sl}</span>
+        {c.scaled ? <React.Fragment><span>RF {t.riskFree}</span><span>TP1 {t.tp1}</span><span>TP2 {t.tp2}</span><span>{t.splitA}/{t.splitB}/{t.splitC}</span></React.Fragment> : <span>TP {t.tp}</span>}
+        <span>{t.lots} lot</span><span>1:{fmt(c.plannedRR)}</span><span>risk ${fmt(c.dollarRisk)}</span>
+        <span style={{ color:rc }}>{c.scaled ? t.scaledOutcome : t.outcome}</span>
+      </div>
+      {t.note && <div style={{ color:C.dim, fontSize:11, marginTop:4, fontStyle:"italic" }}>“{t.note}”</div>}
+      <div style={{ display:"flex", gap:8, marginTop:8 }}>
+        <button onClick={() => onEdit(t)} style={miniBtn(C.blue)}>EDIT</button>
+        <button onClick={() => onDel(t.id)} style={miniBtn(C.red)}>DELETE</button>
+      </div>
+    </div>
+  );
+}
+function WdCard({ e, onDel }) {
+  const w = e.raw;
+  return (
+    <div style={{ background:C.amber + "10", border:"1px solid " + C.amber + "40", borderLeft:"3px solid " + C.amber, borderRadius:8, padding:"8px 12px", marginBottom:6 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}><span style={{ color:C.amber, fontWeight:700, fontSize:12 }}>⤓ WITHDRAWAL</span><span style={{ color:C.dim, fontSize:11 }}>{w.date}</span></div>
+        <div style={{ textAlign:"right" }}><div style={{ color:C.amber, fontWeight:700, fontSize:14 }}>−${fmt(w.amount)}</div><div style={{ color:C.dim, fontSize:10 }}>bal ${fmt(e.balanceAfter,0)}</div></div>
+      </div>
+      {w.note && <div style={{ color:C.dim, fontSize:11, marginTop:3, fontStyle:"italic" }}>“{w.note}”</div>}
+      <div style={{ marginTop:6 }}><button onClick={() => onDel(w.id)} style={miniBtn(C.red)}>DELETE</button></div>
+    </div>
+  );
+}
+function Equity({ data, start }) {
+  const w = 700, h = 90, pad = 4, ys = data.map((d) => d.y), min = Math.min(...ys), max = Math.max(...ys), range = max - min || 1;
+  const pts = data.map((d, i) => (pad + (i / (data.length - 1)) * (w - pad * 2)) + "," + (h - pad - ((d.y - min) / range) * (h - pad * 2)));
+  const up = data[data.length - 1].y >= start;
+  return <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:12, marginBottom:14 }}><div style={{ color:C.dim, fontSize:9.5, letterSpacing:"1px", marginBottom:6 }}>BALANCE CURVE (incl. withdrawals)</div><svg viewBox={"0 0 " + w + " " + h} style={{ width:"100%", height:90, display:"block" }} preserveAspectRatio="none"><polyline points={pts.join(" ")} fill="none" stroke={up ? C.green : C.red} strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg></div>;
+}
+
+function TradeJournal() {
+  const [trades, setTrades] = useState(() => loadLS("tj_trades", []));
+  const [withdrawals, setWithdrawals] = useState(() => loadLS("tj_withdrawals", []));
+  const [startBalance, setStartBalance] = useState(() => { const s = loadLS("tj_settings", {}); return s.startBalance != null ? s.startBalance : 2000; });
+  const [groupBy, setGroupBy] = useState(() => { const s = loadLS("tj_settings", {}); return s.groupBy || "week"; });
+  const [collapsed, setCollapsed] = useState({});
+  const [form, setForm] = useState(emptyForm());
+  const [wd, setWd] = useState({ date: new Date().toISOString().slice(0, 10), amount: "", note: "" });
+  const [pane, setPane] = useState("trade");
+  const [editId, setEditId] = useState(null);
+
+  useEffect(() => { saveLS("tj_trades", trades); }, [trades]);
+  useEffect(() => { saveLS("tj_withdrawals", withdrawals); }, [withdrawals]);
+  useEffect(() => { saveLS("tj_settings", { startBalance, groupBy }); }, [startBalance, groupBy]);
+
+  const preview = useMemo(() => compute(form), [form]);
+  const setField = (k, v) => setForm((f) => {
+    const n = { ...f, [k]: v };
+    if (k === "pair") n.pipValue = INSTRUMENTS[v].valuePerLot;
+    if (k === "analyst") n.style = v === "Meower" ? "simple" : v === "Usama" ? "scaled" : f.style;
+    return n;
+  });
+
+  const saveTrade = () => {
+    if (!compute(form)) return;
+    if (editId) { setTrades((a) => a.map((t) => (t.id === editId ? { ...form, id: editId } : t))); setEditId(null); }
+    else setTrades((a) => [...a, { ...form, id: Date.now() }]);
+    setForm(emptyForm(form.pair, form.analyst));
+  };
+  const editTrade = (t) => { setForm({ ...emptyForm(t.pair, t.analyst), ...t }); setEditId(t.id); setPane("trade"); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const deleteTrade = (id) => { setTrades((a) => a.filter((t) => t.id !== id)); if (editId === id) { setEditId(null); setForm(emptyForm(form.pair, form.analyst)); } };
+  const saveWd = () => { const amt = parseFloat(wd.amount); if (!isFinite(amt) || amt <= 0) return; setWithdrawals((a) => [...a, { ...wd, amount: amt, id: Date.now() }]); setWd({ date: new Date().toISOString().slice(0, 10), amount: "", note: "" }); };
+  const deleteWd = (id) => setWithdrawals((a) => a.filter((w) => w.id !== id));
+
+  const model = useMemo(() => {
+    const events = [
+      ...trades.map((t) => ({ kind: "trade", date: t.date, id: t.id, raw: t, calc: compute(t) })),
+      ...withdrawals.map((w) => ({ kind: "wd", date: w.date, id: w.id, raw: w })),
+    ].filter((e) => e.kind === "wd" || e.calc).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
+
+    let bal = startBalance, tradeCum = 0, peak = startBalance, maxDD = 0, withdrawnTot = 0;
+    let wins = 0, losses = 0, be = 0, pl = 0, rSum = 0, rrSum = 0, rrCount = 0;
+    const equity = [{ x: 0, y: startBalance }], gmap = new Map();
+    const byAnalyst = {};
+
+    events.forEach((e, i) => {
+      const before = bal, key = periodKey(e.date, groupBy);
+      if (!gmap.has(key)) gmap.set(key, { key, label: periodLabel(key, groupBy), items: [], trades: 0, wins: 0, losses: 0, be: 0, pl: 0, withdrawn: 0, openBal: before });
+      const g = gmap.get(key);
+      if (e.kind === "trade") {
+        const c = e.calc;
+        bal += c.result; tradeCum += c.result; pl += c.result; rSum += c.rMultiple;
+        if (c.plannedRR) { rrSum += c.plannedRR; rrCount++; }
+        const w = c.result > 0, l = c.result < 0;
+        if (w) { wins++; g.wins++; } else if (l) { losses++; g.losses++; } else { be++; g.be++; }
+        g.trades++; g.pl += c.result;
+        const a = e.raw.analyst || "Other";
+        if (!byAnalyst[a]) byAnalyst[a] = { name: a, n: 0, w: 0, l: 0, be: 0, r: 0, pl: 0 };
+        const ba = byAnalyst[a]; ba.n++; ba.r += c.rMultiple; ba.pl += c.result;
+        if (w) ba.w++; else if (l) ba.l++; else ba.be++;
+        const perf = startBalance + tradeCum;
+        peak = Math.max(peak, perf); maxDD = Math.max(maxDD, peak - perf);
+      } else { bal -= e.raw.amount; withdrawnTot += e.raw.amount; g.withdrawn += e.raw.amount; }
+      g.items.push({ ...e, balanceAfter: bal });
+      equity.push({ x: i + 1, y: bal });
+    });
+
+    const groups = [...gmap.values()].sort((a, b) => (a.key < b.key ? 1 : -1));
+    groups.forEach((g) => g.items.sort((a, b) => (a.date < b.date ? 1 : b.id - a.id)));
+    const decided = wins + losses;
+    const analysts = Object.values(byAnalyst).map((a) => ({ ...a, winRate: a.w + a.l ? (a.w / (a.w + a.l)) * 100 : 0, exp: a.n ? a.r / a.n : 0 })).sort((a, b) => b.pl - a.pl);
+    return { balance: bal, pl, wins, losses, be, withdrawnTot, winRate: decided ? (wins / decided) * 100 : 0, avgRR: rrCount ? rrSum / rrCount : 0, expectancy: trades.length ? rSum / trades.length : 0, maxDD, maxDDpct: peak ? (maxDD / peak) * 100 : 0, equity, groups, count: trades.length, analysts };
+  }, [trades, withdrawals, startBalance, groupBy]);
+
+  const toggle = (k) => setCollapsed((c) => ({ ...c, [k]: !c[k] }));
+  const allCollapsed = model.groups.length > 0 && model.groups.every((g) => collapsed[g.key]);
+  const toggleAll = () => { if (allCollapsed) setCollapsed({}); else { const n = {}; model.groups.forEach((g) => (n[g.key] = true)); setCollapsed(n); } };
+
+  const exportCSV = () => {
+    const head = ["Date","Analyst","Style","Pair","Dir","Entry","SL","Lots","RiskFree/TP","TP1","TP2","Outcome","$Risk","$Result","R","BalAfter","Note"];
+    const rows = [];
+    [...model.groups].reverse().forEach((g) => [...g.items].reverse().forEach((e) => {
+      if (e.kind === "trade") { const c = e.calc, t = e.raw;
+        rows.push([t.date,t.analyst||"",t.style,t.pair,c.dir===1?"L":"S",t.entry,t.sl,t.lots,t.style==="scaled"?t.riskFree:t.tp,t.tp1||"",t.tp2||"",t.style==="scaled"?t.scaledOutcome:t.outcome,fmt(c.dollarRisk),fmt(c.result),fmt(c.rMultiple),fmt(e.balanceAfter),(t.note||"").replace(/,/g,";")].join(","));
+      } else { const w = e.raw; rows.push([w.date,"","WITHDRAWAL","","","","","","","","","",fmt(-w.amount),"",fmt(e.balanceAfter),(w.note||"").replace(/,/g,";")].join(",")); }
+    }));
+    const blob = new Blob([[head.join(","), ...rows].join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = "trade-journal.csv"; a.click(); URL.revokeObjectURL(url);
+  };
+
+  const riskPct = preview && model.balance > 0 ? (preview.dollarRisk / model.balance) * 100 : 0;
+
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'JetBrains Mono', ui-monospace, monospace", padding:"16px 12px 60px" }}>
+      <div style={{ maxWidth:720, margin:"0 auto" }}>
+        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:18, flexWrap:"wrap", gap:8 }}>
+          <div>
+            <div style={{ fontFamily:"Archivo, sans-serif", fontWeight:800, fontSize:26, letterSpacing:"-0.5px" }}>TRADE<span style={{ color:C.amber }}>·</span>JOURNAL</div>
+            <div style={{ color:C.dim, fontSize:11, letterSpacing:"1px" }}>SIGNAL LOG // PER-ANALYST EXPECTANCY</div>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ color:C.dim, fontSize:11 }}>START $</span>
+            <input type="number" value={startBalance} onChange={(e) => setStartBalance(parseFloat(e.target.value) || 0)} style={{ width:90, background:C.panel, border:"1px solid " + C.line, color:C.text, padding:"6px 8px", borderRadius:6, fontSize:13 }} />
+          </div>
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, marginBottom:14 }}>
+          <Stat label="BALANCE" value={"$" + fmt(model.balance)} sub={"start $" + fmt(startBalance,0) + " · withdrawn $" + fmt(model.withdrawnTot,0)} color={model.balance >= startBalance ? C.green : C.red} big />
+          <Stat label="NET TRADING P/L" value={(model.pl >= 0 ? "+" : "−") + "$" + fmt(Math.abs(model.pl))} color={model.pl >= 0 ? C.green : C.red} big />
+          <Stat label="WIN RATE" value={fmt(model.winRate,1) + "%"} sub={model.wins + "W · " + model.losses + "L · " + model.be + "BE"} color={C.text} />
+          <Stat label="EXPECTANCY" value={(model.expectancy >= 0 ? "+" : "") + fmt(model.expectancy) + "R"} sub="avg per trade" color={model.expectancy >= 0 ? C.green : C.red} />
+          <Stat label="AVG PLANNED RR" value={"1:" + fmt(model.avgRR)} color={C.blue} />
+          <Stat label="MAX DRAWDOWN" value={"$" + fmt(model.maxDD)} sub={fmt(model.maxDDpct,1) + "% (trading)"} color={C.amber} />
+        </div>
+
+        {model.analysts.length > 0 && (
+          <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:"12px 14px", marginBottom:14 }}>
+            <div style={{ color:C.dim, fontSize:9.5, letterSpacing:"1px", marginBottom:8 }}>BY ANALYST — is each one actually profitable?</div>
+            {model.analysts.map((a) => (
+              <div key={a.name} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"6px 0", borderTop:"1px solid " + C.line }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
+                  <span style={{ fontWeight:700, fontSize:13, color: a.name==="Usama"?C.blue:a.name==="Meower"?C.purple:C.text }}>{a.name}</span>
+                  <span style={{ color:C.dim, fontSize:10.5 }}>{a.n} trades · <span style={{color:C.green}}>{a.w}W</span> <span style={{color:C.red}}>{a.l}L</span> {a.be}BE · {fmt(a.winRate,0)}%</span>
+                </div>
+                <div style={{ textAlign:"right" }}>
+                  <div style={{ color: a.pl>=0?C.green:C.red, fontWeight:700, fontSize:13 }}>{a.pl>=0?"+":"−"}${fmt(Math.abs(a.pl))}</div>
+                  <div style={{ color: a.exp>=0?C.green:C.red, fontSize:10 }}>{a.exp>=0?"+":""}{fmt(a.exp)}R exp</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {model.equity.length > 1 && <Equity data={model.equity} start={startBalance} />}
+
+        <div style={{ display:"flex", gap:8, marginBottom: pane ? 8 : 14 }}>
+          <button onClick={() => setPane(pane === "trade" ? null : "trade")} style={{ flex:1, background: pane==="trade"?C.panel:C.panel2, border:"1px solid " + (pane==="trade"?C.blue:C.line), color:C.text, padding:"10px", borderRadius:8, fontSize:13, fontWeight:700 }}>{editId ? "▲ EDIT TRADE" : "＋ TRADE"}</button>
+          <button onClick={() => setPane(pane === "wd" ? null : "wd")} style={{ flex:1, background: pane==="wd"?C.panel:C.panel2, border:"1px solid " + (pane==="wd"?C.amber:C.line), color:C.amber, padding:"10px", borderRadius:8, fontSize:13, fontWeight:700 }}>⤓ WITHDRAWAL</button>
+        </div>
+
+        {pane === "trade" && (
+          <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:14, marginBottom:16 }}>
+            <Row><Field label="DATE"><input type="date" value={form.date} onChange={(e) => setField("date", e.target.value)} style={inp()} /></Field>
+              <Field label="ANALYST"><select value={form.analyst} onChange={(e) => setField("analyst", e.target.value)} style={inp()}>{ANALYSTS.map((a) => <option key={a}>{a}</option>)}</select></Field></Row>
+            <Row><Field label="PAIR"><select value={form.pair} onChange={(e) => setField("pair", e.target.value)} style={inp()}>{Object.keys(INSTRUMENTS).map((k) => <option key={k}>{k}</option>)}</select></Field>
+              <Field label="STYLE">
+                <div style={{ display:"flex", gap:4, background:C.bg, border:"1px solid " + C.line, borderRadius:6, padding:3 }}>
+                  {["simple","scaled"].map((s) => <button key={s} onClick={() => setField("style", s)} style={{ flex:1, background: form.style===s?C.panel2:"transparent", color: form.style===s?C.text:C.dim, border:"none", padding:"6px", borderRadius:4, fontSize:11, fontWeight: form.style===s?700:400 }}>{s==="simple"?"Simple (Meower)":"Scaled (Usama)"}</button>)}
+                </div>
+              </Field></Row>
+            <Row><Field label="ENTRY"><input type="number" step="any" value={form.entry} onChange={(e) => setField("entry", e.target.value)} placeholder="4500.00" style={inp()} /></Field>
+              <Field label="LOT SIZE"><input type="number" step="any" value={form.lots} onChange={(e) => setField("lots", e.target.value)} placeholder="0.05" style={inp()} /></Field></Row>
+            <Row><Field label="STOP LOSS"><input type="number" step="any" value={form.sl} onChange={(e) => setField("sl", e.target.value)} placeholder="4495.00" style={inp(!preview || preview.slValid ? C.line : C.red)} /></Field>
+              <Field label="PIP VALUE / LOT ($)"><input type="number" step="any" value={form.pipValue} onChange={(e) => setField("pipValue", e.target.value)} style={inp()} /></Field></Row>
+
+            {form.style === "simple" ? (
+              <React.Fragment>
+                <Row><Field label="TAKE PROFIT"><input type="number" step="any" value={form.tp} onChange={(e) => setField("tp", e.target.value)} placeholder="4520.00" style={inp()} /></Field>
+                  <Field label="OUTCOME"><select value={form.outcome} onChange={(e) => setField("outcome", e.target.value)} style={inp()}><option>TP Hit</option><option>SL Hit</option><option>Breakeven</option><option>Manual</option></select></Field></Row>
+                {form.outcome === "Manual" && <Field label="MANUAL EXIT"><input type="number" step="any" value={form.exit} onChange={(e) => setField("exit", e.target.value)} style={inp()} /></Field>}
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                <Row><Field label="RISK-FREE LVL"><input type="number" step="any" value={form.riskFree} onChange={(e) => setField("riskFree", e.target.value)} placeholder="4505.00" style={inp()} /></Field>
+                  <Field label="OUTCOME"><select value={form.scaledOutcome} onChange={(e) => setField("scaledOutcome", e.target.value)} style={inp()}><option value="Full SL">Full SL (lost)</option><option value="Risk-free">Risk-free, rest BE</option><option value="TP1">TP1, rest BE</option><option value="Full">TP1 + TP2 (full)</option><option value="Manual">Manual</option></select></Field></Row>
+                <Row><Field label="TP1"><input type="number" step="any" value={form.tp1} onChange={(e) => setField("tp1", e.target.value)} placeholder="4515.00" style={inp()} /></Field>
+                  <Field label="TP2"><input type="number" step="any" value={form.tp2} onChange={(e) => setField("tp2", e.target.value)} placeholder="4530.00" style={inp()} /></Field></Row>
+                <Row>
+                  <Field label="% AT RF"><input type="number" value={form.splitA} onChange={(e) => setField("splitA", e.target.value)} style={inp()} /></Field>
+                  <Field label="% TP1"><input type="number" value={form.splitB} onChange={(e) => setField("splitB", e.target.value)} style={inp()} /></Field>
+                  <Field label="% TP2"><input type="number" value={form.splitC} onChange={(e) => setField("splitC", e.target.value)} style={inp()} /></Field>
+                </Row>
+                {form.scaledOutcome === "Manual" && <Field label="MANUAL EXIT (full pos)"><input type="number" step="any" value={form.exitS} onChange={(e) => setField("exitS", e.target.value)} style={inp()} /></Field>}
+              </React.Fragment>
+            )}
+            <Field label="NOTE (optional)"><input value={form.note} onChange={(e) => setField("note", e.target.value)} placeholder="reason, session, etc." style={inp()} /></Field>
+
+            {preview && (
+              <div style={{ marginTop:10, padding:10, background:C.panel2, borderRadius:8, fontSize:12 }}>
+                {!preview.slValid && <div style={{ color:C.red, marginBottom:6 }}>⚠ Check your level ordering for a {preview.dir === 1 ? "long" : "short"} (SL / RF / TP sides).</div>}
+                <div style={{ display:"flex", flexWrap:"wrap", gap:"4px 16px", color:C.dim }}>
+                  <span>DIR <b style={{ color: preview.dir === 1 ? C.green : C.red }}>{preview.dir === 1 ? "LONG" : "SHORT"}</b></span>
+                  <span>RISK <b style={{ color: riskPct > 2.5 ? C.red : C.text }}>${fmt(preview.dollarRisk)} ({fmt(riskPct,2)}%)</b></span>
+                  <span>PLANNED <b style={{ color:C.blue }}>1:{fmt(preview.plannedRR)}</b></span>
+                  {preview.scaled && <span>BLENDED if full <b style={{ color:C.amber }}>{fmt(preview.blendedFullR)}R</b></span>}
+                  <span>RESULT <b style={{ color: preview.result >= 0 ? C.green : C.red }}>{preview.result >= 0 ? "+" : "−"}${fmt(Math.abs(preview.result))} ({preview.rMultiple>=0?"+":""}{fmt(preview.rMultiple)}R)</b></span>
+                </div>
+              </div>
+            )}
+            <button onClick={saveTrade} disabled={!preview} style={{ width:"100%", marginTop:12, background: preview?C.green:C.line, color: preview?"#06251a":C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>{editId ? "UPDATE TRADE" : "LOG TRADE"}</button>
+          </div>
+        )}
+
+        {pane === "wd" && (
+          <div style={{ background:C.panel, border:"1px solid " + C.amber + "33", borderRadius:10, padding:14, marginBottom:16 }}>
+            <div style={{ color:C.amber, fontSize:11, letterSpacing:"1px", marginBottom:10 }}>RECORD WITHDRAWAL — reduces balance; next period reports from the lower baseline.</div>
+            <Row><Field label="DATE"><input type="date" value={wd.date} onChange={(e) => setWd({ ...wd, date: e.target.value })} style={inp()} /></Field>
+              <Field label="AMOUNT ($)"><input type="number" step="any" value={wd.amount} onChange={(e) => setWd({ ...wd, amount: e.target.value })} placeholder="200" style={inp()} /></Field></Row>
+            <Field label="NOTE (optional)"><input value={wd.note} onChange={(e) => setWd({ ...wd, note: e.target.value })} placeholder="profit split, monthly payout" style={inp()} /></Field>
+            <button onClick={saveWd} disabled={!(parseFloat(wd.amount) > 0)} style={{ width:"100%", marginTop:6, background: parseFloat(wd.amount) > 0 ? C.amber : C.line, color: parseFloat(wd.amount) > 0 ? "#2a1c02" : C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>RECORD WITHDRAWAL</button>
+          </div>
+        )}
+
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
+          <div style={{ display:"flex", gap:4, background:C.panel, border:"1px solid " + C.line, borderRadius:8, padding:3 }}>
+            {["day","week","month"].map((m) => <button key={m} onClick={() => setGroupBy(m)} style={{ background: groupBy===m?C.panel2:"transparent", color: groupBy===m?C.text:C.dim, border:"none", padding:"6px 12px", borderRadius:6, fontSize:11, fontWeight: groupBy===m?700:400 }}>{m.toUpperCase()}</button>)}
+          </div>
+          <div style={{ display:"flex", gap:8 }}>
+            {model.groups.length > 0 && <button onClick={toggleAll} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"6px 10px", borderRadius:6, fontSize:11 }}>{allCollapsed ? "EXPAND ALL" : "COLLAPSE ALL"}</button>}
+            {(trades.length > 0 || withdrawals.length > 0) && <button onClick={exportCSV} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"6px 10px", borderRadius:6, fontSize:11 }}>⤓ CSV</button>}
+          </div>
+        </div>
+
+        {model.groups.length === 0 ? (
+          <div style={{ textAlign:"center", color:C.dim, padding:"40px 0", fontSize:13 }}>No trades yet. Log your first signal above.</div>
+        ) : model.groups.map((g) => {
+          const isOpen = !collapsed[g.key], plPct = g.openBal > 0 ? (g.pl / g.openBal) * 100 : 0, pc = g.pl > 0 ? C.green : g.pl < 0 ? C.red : C.dim;
+          return (
+            <div key={g.key} style={{ marginBottom:10 }}>
+              <div onClick={() => toggle(g.key)} style={{ display:"flex", alignItems:"center", gap:10, background:C.panel2, border:"1px solid " + C.line, borderRadius:8, padding:"10px 12px", cursor:"pointer" }}>
+                <span style={{ color:C.dim, fontSize:12, transform: isOpen ? "rotate(90deg)" : "none", transition:"transform .15s" }}>▶</span>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:700, fontSize:13 }}>{g.label}</div>
+                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>{g.trades} trade{g.trades!==1?"s":""} · <span style={{ color:C.green }}>{g.wins}W</span> <span style={{ color:C.red }}>{g.losses}L</span>{g.be?" " + g.be + "BE":""}{g.withdrawn>0 && <span style={{ color:C.amber }}> · ⤓ ${fmt(g.withdrawn,0)}</span>}</div>
+                </div>
+                <div style={{ textAlign:"right" }}>
+                  <div style={{ color:pc, fontWeight:700, fontSize:14 }}>{g.pl >= 0 ? "+" : "−"}${fmt(Math.abs(g.pl))}</div>
+                  <div style={{ color:pc, fontSize:10.5 }}>{plPct >= 0 ? "+" : ""}{fmt(plPct,1)}%</div>
+                </div>
+              </div>
+              {isOpen && <div style={{ marginTop:6, paddingLeft:6 }}>{g.items.map((e) => e.kind === "trade" ? <TradeCard key={e.id} e={e} onEdit={editTrade} onDel={deleteTrade} /> : <WdCard key={e.id} e={e} onDel={deleteWd} />)}</div>}
+            </div>
+          );
+        })}
+
+        <div style={{ color:C.dim, fontSize:10, lineHeight:1.6, marginTop:24, borderTop:"1px solid " + C.line, paddingTop:12 }}>
+          Data is saved automatically in this browser (localStorage) and survives refresh. Scaled (Usama) trades compute blended realized R. The BY ANALYST panel shows each analyst's real expectancy. Risk % is against current balance for your 1% / 2% rule. Adjust pip value to your broker's Gold spec. Use the CSV export regularly as a backup.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<TradeJournal />);
+</script>
+</body>
+</html>
