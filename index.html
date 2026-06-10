@@ -312,6 +312,26 @@ function TradeJournal({ session, onSignOut }) {
     const url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = "trade-journal.csv"; a.click(); URL.revokeObjectURL(url);
   };
 
+  const fileRef = React.useRef(null);
+  const backup = () => {
+    const payload = { trades, withdrawals, settings: { startBalance, groupBy }, exportedAt: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = "trade-journal-backup.json"; a.click(); URL.revokeObjectURL(url);
+  };
+  const restore = async (file) => {
+    if (!file) return;
+    try {
+      const p = JSON.parse(await file.text());
+      if (!Array.isArray(p.trades) && !Array.isArray(p.withdrawals)) { alert("That file doesn't look like a journal backup."); return; }
+      setSyncing(true);
+      if (p.trades && p.trades.length) await sb.from("trades").upsert(p.trades.map((t) => ({ id: t.id, data: t })));
+      if (p.withdrawals && p.withdrawals.length) await sb.from("withdrawals").upsert(p.withdrawals.map((w) => ({ id: w.id, data: w })));
+      if (p.settings) await sb.from("settings").upsert({ id: 1, start_balance: p.settings.startBalance != null ? p.settings.startBalance : 2000, group_by: p.settings.groupBy || "week" });
+      await fetchAll(); setSyncing(false);
+      alert("Restore complete — your trades are loaded.");
+    } catch (e) { setSyncing(false); alert("Could not read that file: " + e.message); }
+  };
+
   const riskPct = preview && model.balance > 0 ? (preview.dollarRisk / model.balance) * 100 : 0;
 
   if (loading) return centerBox(<div style={{ color:C.dim, textAlign:"center" }}>Loading your journal…</div>);
@@ -436,9 +456,12 @@ function TradeJournal({ session, onSignOut }) {
           <div style={{ display:"flex", gap:4, background:C.panel, border:"1px solid " + C.line, borderRadius:8, padding:3 }}>
             {["day","week","month"].map((m) => <button key={m} onClick={() => setGroupBy(m)} style={{ background: groupBy===m?C.panel2:"transparent", color: groupBy===m?C.text:C.dim, border:"none", padding:"6px 12px", borderRadius:6, fontSize:11, fontWeight: groupBy===m?700:400 }}>{m.toUpperCase()}</button>)}
           </div>
-          <div style={{ display:"flex", gap:8 }}>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
             {model.groups.length > 0 && <button onClick={toggleAll} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"6px 10px", borderRadius:6, fontSize:11 }}>{allCollapsed ? "EXPAND ALL" : "COLLAPSE ALL"}</button>}
-            {(trades.length > 0 || withdrawals.length > 0) && <button onClick={exportCSV} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"6px 10px", borderRadius:6, fontSize:11 }}>⤓ CSV</button>}
+            <button onClick={backup} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"6px 10px", borderRadius:6, fontSize:11 }}>⤓ Backup</button>
+            <button onClick={() => fileRef.current && fileRef.current.click()} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"6px 10px", borderRadius:6, fontSize:11 }}>⤒ Restore</button>
+            <button onClick={exportCSV} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"6px 10px", borderRadius:6, fontSize:11 }}>⤓ CSV</button>
+            <input ref={fileRef} type="file" accept="application/json,.json" style={{ display:"none" }} onChange={(e) => { restore(e.target.files[0]); e.target.value = ""; }} />
           </div>
         </div>
 
