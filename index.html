@@ -3,7 +3,16 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Trade Journal</title>
+<title>Trade Journal — Cloud</title>
+<!--
+  SETUP (one time):
+  1. Create a free project at supabase.com
+  2. In the SQL editor, run the SQL from the chat (creates trades / withdrawals / settings tables + policies)
+  3. Authentication > Providers > Email: ON.  Authentication > Settings: turn OFF "Allow new users to sign up"
+     Then add your + Dani's accounts manually under Authentication > Users > Add user.
+  4. Project Settings > API: copy the Project URL and the anon public key into the two lines below.
+  5. Upload this file as index.html to GitHub Pages. Both of you log in and share one journal.
+-->
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Archivo:wght@600;800&display=swap');
   * { box-sizing: border-box; }
@@ -16,15 +25,19 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo } = React;
 
-// ---------- persistent storage via localStorage ----------
-const loadLS = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } };
-const saveLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+// ====== PASTE YOUR SUPABASE KEYS HERE ======
+const SUPABASE_URL = "https://bsdgpmzoqygekgkqmutc.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_3HRGbxz4IkAC_WBPsYXRrA_5XMw8IJM";
+// ===========================================
+const CONFIG_OK = !SUPABASE_URL.includes("YOUR-PROJECT") && !SUPABASE_ANON_KEY.includes("YOUR-ANON");
+const sb = CONFIG_OK ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 const INSTRUMENTS = {
   "XAU/USD (Gold)": { pip: 0.1, valuePerLot: 10 },
@@ -38,17 +51,14 @@ const INSTRUMENTS = {
   Custom: { pip: 0.0001, valuePerLot: 10 },
 };
 const ANALYSTS = ["Usama", "Meower", "Other"];
-
 const fmt = (n, d = 2) => isFinite(n) ? n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 
 const emptyForm = (pair = "XAU/USD (Gold)", analyst = "Usama") => ({
-  date: new Date().toISOString().slice(0, 10),
-  analyst, pair,
+  date: new Date().toISOString().slice(0, 10), analyst, pair,
   style: analyst === "Meower" ? "simple" : "scaled",
   entry: "", sl: "", lots: "", pipValue: INSTRUMENTS[pair].valuePerLot,
   tp: "", outcome: "TP Hit", exit: "",
-  riskFree: "", tp1: "", tp2: "", splitA: 50, splitB: 25, splitC: 25, scaledOutcome: "Full", exitS: "",
-  note: "",
+  riskFree: "", tp1: "", tp2: "", splitA: 50, splitB: 25, splitC: 25, scaledOutcome: "Full", exitS: "", note: "",
 });
 
 function compute(t) {
@@ -58,7 +68,6 @@ function compute(t) {
   const riskPips = Math.abs(entry - sl) / inst.pip;
   const dollarRisk = riskPips * pv * lots;
   if (riskPips <= 0) return null;
-
   if (t.style === "scaled") {
     const rf = parseFloat(t.riskFree), tp1 = parseFloat(t.tp1), tp2 = parseFloat(t.tp2);
     if ([rf, tp1, tp2].some((v) => !isFinite(v))) return null;
@@ -77,7 +86,6 @@ function compute(t) {
     const slValid = dir === 1 ? sl < entry && rf > entry && tp1 > entry && tp2 >= tp1 : sl > entry && rf < entry && tp1 < entry && tp2 <= tp1;
     return { dir, riskPips, dollarRisk, result, rMultiple: dollarRisk > 0 ? result / dollarRisk : 0, plannedRR, blendedFullR, slValid, scaled: true };
   }
-
   const tp = parseFloat(t.tp);
   if (!isFinite(tp)) return null;
   const dir = tp >= entry ? 1 : -1;
@@ -92,7 +100,6 @@ function compute(t) {
   else if (t.outcome === "Manual") { const ex = parseFloat(t.exit); if (isFinite(ex)) result = ((ex - entry) / inst.pip) * dir * pv * lots; }
   return { dir, riskPips, dollarRisk, dollarReward, result, rMultiple: dollarRisk > 0 ? result / dollarRisk : 0, plannedRR, slValid, scaled: false };
 }
-
 function periodKey(dateStr, mode) {
   const d = new Date(dateStr + "T00:00:00");
   if (mode === "day") return dateStr;
@@ -169,20 +176,68 @@ function Equity({ data, start }) {
   return <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:12, marginBottom:14 }}><div style={{ color:C.dim, fontSize:9.5, letterSpacing:"1px", marginBottom:6 }}>BALANCE CURVE (incl. withdrawals)</div><svg viewBox={"0 0 " + w + " " + h} style={{ width:"100%", height:90, display:"block" }} preserveAspectRatio="none"><polyline points={pts.join(" ")} fill="none" stroke={up ? C.green : C.red} strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg></div>;
 }
 
-function TradeJournal() {
-  const [trades, setTrades] = useState(() => loadLS("tj_trades", []));
-  const [withdrawals, setWithdrawals] = useState(() => loadLS("tj_withdrawals", []));
-  const [startBalance, setStartBalance] = useState(() => { const s = loadLS("tj_settings", {}); return s.startBalance != null ? s.startBalance : 2000; });
-  const [groupBy, setGroupBy] = useState(() => { const s = loadLS("tj_settings", {}); return s.groupBy || "week"; });
+function centerBox(children) {
+  return <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'JetBrains Mono', monospace", display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+    <div style={{ width:"100%", maxWidth:380, background:C.panel, border:"1px solid " + C.line, borderRadius:12, padding:24 }}>{children}</div>
+  </div>;
+}
+
+function ConfigNeeded() {
+  return centerBox(<React.Fragment>
+    <div style={{ fontFamily:"Archivo, sans-serif", fontWeight:800, fontSize:20, marginBottom:10 }}>Almost there</div>
+    <div style={{ color:C.dim, fontSize:13, lineHeight:1.6 }}>Open this file and paste your Supabase <b style={{color:C.text}}>Project URL</b> and <b style={{color:C.text}}>anon public key</b> into the two lines near the top (look for PASTE YOUR SUPABASE KEYS HERE), then re-upload. Setup steps are in the comment at the top of the file.</div>
+  </React.Fragment>);
+}
+
+function Login() {
+  const [email, setEmail] = useState(""); const [pw, setPw] = useState(""); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true); setErr("");
+    const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+    if (error) setErr(error.message);
+    setBusy(false);
+  };
+  return centerBox(<React.Fragment>
+    <div style={{ fontFamily:"Archivo, sans-serif", fontWeight:800, fontSize:22, marginBottom:2 }}>TRADE<span style={{ color:C.amber }}>·</span>JOURNAL</div>
+    <div style={{ color:C.dim, fontSize:11, letterSpacing:"1px", marginBottom:18 }}>SIGN IN</div>
+    <div style={{ color:C.dim, fontSize:10, letterSpacing:"1px", marginBottom:4 }}>EMAIL</div>
+    <input value={email} onChange={(e)=>setEmail(e.target.value)} placeholder="you@email.com" style={{ ...inp(), marginBottom:10 }} />
+    <div style={{ color:C.dim, fontSize:10, letterSpacing:"1px", marginBottom:4 }}>PASSWORD</div>
+    <input type="password" value={pw} onChange={(e)=>setPw(e.target.value)} onKeyDown={(e)=>e.key==="Enter"&&go()} placeholder="••••••••" style={{ ...inp(), marginBottom:14 }} />
+    {err && <div style={{ color:C.red, fontSize:12, marginBottom:10 }}>{err}</div>}
+    <button onClick={go} disabled={busy} style={{ width:"100%", background:C.green, color:"#06251a", border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>{busy ? "Signing in…" : "SIGN IN"}</button>
+    <div style={{ color:C.dim, fontSize:10, marginTop:12, lineHeight:1.5 }}>Accounts are created in your Supabase dashboard (Authentication → Users). Public sign-up is off.</div>
+  </React.Fragment>);
+}
+
+function TradeJournal({ session, onSignOut }) {
+  const [trades, setTrades] = useState([]);
+  const [withdrawals, setWithdrawals] = useState([]);
+  const [startBalance, setStartBalance] = useState(2000);
+  const [groupBy, setGroupBy] = useState("week");
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [collapsed, setCollapsed] = useState({});
   const [form, setForm] = useState(emptyForm());
   const [wd, setWd] = useState({ date: new Date().toISOString().slice(0, 10), amount: "", note: "" });
   const [pane, setPane] = useState("trade");
   const [editId, setEditId] = useState(null);
 
-  useEffect(() => { saveLS("tj_trades", trades); }, [trades]);
-  useEffect(() => { saveLS("tj_withdrawals", withdrawals); }, [withdrawals]);
-  useEffect(() => { saveLS("tj_settings", { startBalance, groupBy }); }, [startBalance, groupBy]);
+  const fetchAll = async () => {
+    try {
+      const [tr, wr, st] = await Promise.all([
+        sb.from("trades").select("id,data"),
+        sb.from("withdrawals").select("id,data"),
+        sb.from("settings").select("*").eq("id", 1).maybeSingle(),
+      ]);
+      setTrades((tr.data || []).map((r) => ({ ...r.data, id: r.id })));
+      setWithdrawals((wr.data || []).map((r) => ({ ...r.data, id: r.id })));
+      if (st.data) { setStartBalance(st.data.start_balance != null ? Number(st.data.start_balance) : 2000); setGroupBy(st.data.group_by || "week"); }
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  };
+  useEffect(() => { fetchAll(); }, []);
+  useEffect(() => { if (!loading) sb.from("settings").upsert({ id: 1, start_balance: startBalance, group_by: groupBy }); }, [startBalance, groupBy, loading]);
 
   const preview = useMemo(() => compute(form), [form]);
   const setField = (k, v) => setForm((f) => {
@@ -192,28 +247,27 @@ function TradeJournal() {
     return n;
   });
 
-  const saveTrade = () => {
+  const saveTrade = async () => {
     if (!compute(form)) return;
-    if (editId) { setTrades((a) => a.map((t) => (t.id === editId ? { ...form, id: editId } : t))); setEditId(null); }
-    else setTrades((a) => [...a, { ...form, id: Date.now() }]);
-    setForm(emptyForm(form.pair, form.analyst));
+    const id = editId || Date.now();
+    setSyncing(true);
+    await sb.from("trades").upsert({ id, data: { ...form, id } });
+    setEditId(null); setForm(emptyForm(form.pair, form.analyst));
+    await fetchAll(); setSyncing(false);
   };
   const editTrade = (t) => { setForm({ ...emptyForm(t.pair, t.analyst), ...t }); setEditId(t.id); setPane("trade"); window.scrollTo({ top: 0, behavior: "smooth" }); };
-  const deleteTrade = (id) => { setTrades((a) => a.filter((t) => t.id !== id)); if (editId === id) { setEditId(null); setForm(emptyForm(form.pair, form.analyst)); } };
-  const saveWd = () => { const amt = parseFloat(wd.amount); if (!isFinite(amt) || amt <= 0) return; setWithdrawals((a) => [...a, { ...wd, amount: amt, id: Date.now() }]); setWd({ date: new Date().toISOString().slice(0, 10), amount: "", note: "" }); };
-  const deleteWd = (id) => setWithdrawals((a) => a.filter((w) => w.id !== id));
+  const deleteTrade = async (id) => { setSyncing(true); await sb.from("trades").delete().eq("id", id); if (editId === id) { setEditId(null); setForm(emptyForm(form.pair, form.analyst)); } await fetchAll(); setSyncing(false); };
+  const saveWd = async () => { const amt = parseFloat(wd.amount); if (!isFinite(amt) || amt <= 0) return; const id = Date.now(); setSyncing(true); await sb.from("withdrawals").upsert({ id, data: { ...wd, amount: amt, id } }); setWd({ date: new Date().toISOString().slice(0, 10), amount: "", note: "" }); await fetchAll(); setSyncing(false); };
+  const deleteWd = async (id) => { setSyncing(true); await sb.from("withdrawals").delete().eq("id", id); await fetchAll(); setSyncing(false); };
 
   const model = useMemo(() => {
     const events = [
       ...trades.map((t) => ({ kind: "trade", date: t.date, id: t.id, raw: t, calc: compute(t) })),
       ...withdrawals.map((w) => ({ kind: "wd", date: w.date, id: w.id, raw: w })),
     ].filter((e) => e.kind === "wd" || e.calc).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
-
     let bal = startBalance, tradeCum = 0, peak = startBalance, maxDD = 0, withdrawnTot = 0;
     let wins = 0, losses = 0, be = 0, pl = 0, rSum = 0, rrSum = 0, rrCount = 0;
-    const equity = [{ x: 0, y: startBalance }], gmap = new Map();
-    const byAnalyst = {};
-
+    const equity = [{ x: 0, y: startBalance }], gmap = new Map(); const byAnalyst = {};
     events.forEach((e, i) => {
       const before = bal, key = periodKey(e.date, groupBy);
       if (!gmap.has(key)) gmap.set(key, { key, label: periodLabel(key, groupBy), items: [], trades: 0, wins: 0, losses: 0, be: 0, pl: 0, withdrawn: 0, openBal: before });
@@ -235,7 +289,6 @@ function TradeJournal() {
       g.items.push({ ...e, balanceAfter: bal });
       equity.push({ x: i + 1, y: bal });
     });
-
     const groups = [...gmap.values()].sort((a, b) => (a.key < b.key ? 1 : -1));
     groups.forEach((g) => g.items.sort((a, b) => (a.date < b.date ? 1 : b.id - a.id)));
     const decided = wins + losses;
@@ -261,18 +314,25 @@ function TradeJournal() {
 
   const riskPct = preview && model.balance > 0 ? (preview.dollarRisk / model.balance) * 100 : 0;
 
+  if (loading) return centerBox(<div style={{ color:C.dim, textAlign:"center" }}>Loading your journal…</div>);
+
   return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'JetBrains Mono', ui-monospace, monospace", padding:"16px 12px 60px" }}>
       <div style={{ maxWidth:720, margin:"0 auto" }}>
-        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:18, flexWrap:"wrap", gap:8 }}>
+        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:6, flexWrap:"wrap", gap:8 }}>
           <div>
             <div style={{ fontFamily:"Archivo, sans-serif", fontWeight:800, fontSize:26, letterSpacing:"-0.5px" }}>TRADE<span style={{ color:C.amber }}>·</span>JOURNAL</div>
-            <div style={{ color:C.dim, fontSize:11, letterSpacing:"1px" }}>SIGNAL LOG // PER-ANALYST EXPECTANCY</div>
+            <div style={{ color:C.dim, fontSize:11, letterSpacing:"1px" }}>SHARED CLOUD · {session.user.email}</div>
           </div>
           <div style={{ display:"flex", alignItems:"center", gap:8 }}>
             <span style={{ color:C.dim, fontSize:11 }}>START $</span>
-            <input type="number" value={startBalance} onChange={(e) => setStartBalance(parseFloat(e.target.value) || 0)} style={{ width:90, background:C.panel, border:"1px solid " + C.line, color:C.text, padding:"6px 8px", borderRadius:6, fontSize:13 }} />
+            <input type="number" value={startBalance} onChange={(e) => setStartBalance(parseFloat(e.target.value) || 0)} style={{ width:84, background:C.panel, border:"1px solid " + C.line, color:C.text, padding:"6px 8px", borderRadius:6, fontSize:13 }} />
           </div>
+        </div>
+        <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginBottom:14 }}>
+          <span style={{ color:C.dim, fontSize:10, alignSelf:"center" }}>{syncing ? "syncing…" : "synced ✓"}</span>
+          <button onClick={fetchAll} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"4px 10px", borderRadius:6, fontSize:11 }}>↻ Sync</button>
+          <button onClick={onSignOut} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"4px 10px", borderRadius:6, fontSize:11 }}>Sign out</button>
         </div>
 
         <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, marginBottom:14 }}>
@@ -358,7 +418,7 @@ function TradeJournal() {
                 </div>
               </div>
             )}
-            <button onClick={saveTrade} disabled={!preview} style={{ width:"100%", marginTop:12, background: preview?C.green:C.line, color: preview?"#06251a":C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>{editId ? "UPDATE TRADE" : "LOG TRADE"}</button>
+            <button onClick={saveTrade} disabled={!preview || syncing} style={{ width:"100%", marginTop:12, background: preview && !syncing ?C.green:C.line, color: preview && !syncing ?"#06251a":C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>{syncing ? "Saving…" : (editId ? "UPDATE TRADE" : "LOG TRADE")}</button>
           </div>
         )}
 
@@ -368,7 +428,7 @@ function TradeJournal() {
             <Row><Field label="DATE"><input type="date" value={wd.date} onChange={(e) => setWd({ ...wd, date: e.target.value })} style={inp()} /></Field>
               <Field label="AMOUNT ($)"><input type="number" step="any" value={wd.amount} onChange={(e) => setWd({ ...wd, amount: e.target.value })} placeholder="200" style={inp()} /></Field></Row>
             <Field label="NOTE (optional)"><input value={wd.note} onChange={(e) => setWd({ ...wd, note: e.target.value })} placeholder="profit split, monthly payout" style={inp()} /></Field>
-            <button onClick={saveWd} disabled={!(parseFloat(wd.amount) > 0)} style={{ width:"100%", marginTop:6, background: parseFloat(wd.amount) > 0 ? C.amber : C.line, color: parseFloat(wd.amount) > 0 ? "#2a1c02" : C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>RECORD WITHDRAWAL</button>
+            <button onClick={saveWd} disabled={!(parseFloat(wd.amount) > 0) || syncing} style={{ width:"100%", marginTop:6, background: parseFloat(wd.amount) > 0 && !syncing ? C.amber : C.line, color: parseFloat(wd.amount) > 0 && !syncing ? "#2a1c02" : C.dim, border:"none", padding:"12px", borderRadius:8, fontWeight:700, fontSize:14 }}>{syncing ? "Saving…" : "RECORD WITHDRAWAL"}</button>
           </div>
         )}
 
@@ -405,14 +465,29 @@ function TradeJournal() {
         })}
 
         <div style={{ color:C.dim, fontSize:10, lineHeight:1.6, marginTop:24, borderTop:"1px solid " + C.line, paddingTop:12 }}>
-          Data is saved automatically in this browser (localStorage) and survives refresh. Scaled (Usama) trades compute blended realized R. The BY ANALYST panel shows each analyst's real expectancy. Risk % is against current balance for your 1% / 2% rule. Adjust pip value to your broker's Gold spec. Use the CSV export regularly as a backup.
+          Shared cloud journal — you and Dani see the same trades from any device. Tap ↻ Sync to pull the latest after the other person logs a trade. Export CSV regularly as a backup.
         </div>
       </div>
     </div>
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<TradeJournal />);
+function App() {
+  const [session, setSession] = useState(null);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!CONFIG_OK) { setReady(true); return; }
+    sb.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); });
+    const { data: subc } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => subc.subscription.unsubscribe();
+  }, []);
+  if (!CONFIG_OK) return <ConfigNeeded />;
+  if (!ready) return centerBox(<div style={{ color:C.dim, textAlign:"center" }}>Loading…</div>);
+  if (!session) return <Login />;
+  return <TradeJournal session={session} onSignOut={() => sb.auth.signOut()} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
 </html>
