@@ -218,6 +218,7 @@ function TradeJournal({ session, onSignOut }) {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [collapsed, setCollapsed] = useState({});
+  const [openAnalyst, setOpenAnalyst] = useState(null);
   const [form, setForm] = useState(emptyForm());
   const [wd, setWd] = useState({ date: new Date().toISOString().slice(0, 10), amount: "", note: "", type: "deposit" });
   const [pane, setPane] = useState("trade");
@@ -280,9 +281,10 @@ function TradeJournal({ session, onSignOut }) {
         if (w) { wins++; g.wins++; } else if (l) { losses++; g.losses++; } else { be++; g.be++; }
         g.trades++; g.pl += c.result;
         const a = e.raw.analyst || "Other";
-        if (!byAnalyst[a]) byAnalyst[a] = { name: a, n: 0, w: 0, l: 0, be: 0, r: 0, pl: 0 };
+        if (!byAnalyst[a]) byAnalyst[a] = { name: a, n: 0, w: 0, l: 0, be: 0, r: 0, pl: 0, items: [] };
         const ba = byAnalyst[a]; ba.n++; ba.r += c.rMultiple; ba.pl += c.result;
         if (w) ba.w++; else if (l) ba.l++; else ba.be++;
+        ba.items.push({ date: e.date, id: e.id, raw: e.raw, calc: c, balanceAfter: bal });
         const perf = startBalance + tradeCum;
         peak = Math.max(peak, perf); maxDD = Math.max(maxDD, peak - perf);
       } else if (e.raw.type === "deposit") { bal += e.raw.amount; depositedTot += e.raw.amount; g.deposited += e.raw.amount; }
@@ -293,7 +295,7 @@ function TradeJournal({ session, onSignOut }) {
     const groups = [...gmap.values()].sort((a, b) => (a.key < b.key ? 1 : -1));
     groups.forEach((g) => g.items.sort((a, b) => (a.date < b.date ? 1 : b.id - a.id)));
     const decided = wins + losses;
-    const analysts = Object.values(byAnalyst).map((a) => ({ ...a, winRate: a.w + a.l ? (a.w / (a.w + a.l)) * 100 : 0, exp: a.n ? a.r / a.n : 0 })).sort((a, b) => b.pl - a.pl);
+    const analysts = Object.values(byAnalyst).map((a) => ({ ...a, items: [...a.items].sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : y.id - x.id)), winRate: a.w + a.l ? (a.w / (a.w + a.l)) * 100 : 0, exp: a.n ? a.r / a.n : 0 })).sort((a, b) => b.pl - a.pl);
     return { balance: bal, pl, wins, losses, be, withdrawnTot, depositedTot, winRate: decided ? (wins / decided) * 100 : 0, avgRR: rrCount ? rrSum / rrCount : 0, expectancy: trades.length ? rSum / trades.length : 0, maxDD, maxDDpct: peak ? (maxDD / peak) * 100 : 0, equity, groups, count: trades.length, analysts };
   }, [trades, withdrawals, startBalance, groupBy]);
 
@@ -369,16 +371,33 @@ function TradeJournal({ session, onSignOut }) {
           <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:"12px 14px", marginBottom:14 }}>
             <div style={{ color:C.dim, fontSize:9.5, letterSpacing:"1px", marginBottom:8 }}>BY ANALYST — is each one actually profitable?</div>
             {model.analysts.map((a) => (
-              <div key={a.name} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"6px 0", borderTop:"1px solid " + C.line }}>
-                <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
-                  <span style={{ fontWeight:700, fontSize:13, color: a.name==="Usama"?C.blue:a.name==="Meower"?C.purple:C.text }}>{a.name}</span>
-                  <span style={{ color:C.dim, fontSize:10.5 }}>{a.n} trades · <span style={{color:C.green}}>{a.w}W</span> <span style={{color:C.red}}>{a.l}L</span> {a.be}BE · {fmt(a.winRate,0)}%</span>
+              <React.Fragment key={a.name}>
+                <div onClick={() => setOpenAnalyst(openAnalyst === a.name ? null : a.name)} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"6px 0", borderTop:"1px solid " + C.line, cursor:"pointer" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
+                    <span style={{ color:C.dim, fontSize:10, transform: openAnalyst === a.name ? "rotate(90deg)" : "none", transition:"transform .15s" }}>▶</span>
+                    <span style={{ fontWeight:700, fontSize:13, color: a.name==="Usama"?C.blue:a.name==="Meower"?C.purple:C.text }}>{a.name}</span>
+                    <span style={{ color:C.dim, fontSize:10.5 }}>{a.n} trades · <span style={{color:C.green}}>{a.w}W</span> <span style={{color:C.red}}>{a.l}L</span> {a.be}BE · {fmt(a.winRate,0)}%</span>
+                  </div>
+                  <div style={{ textAlign:"right" }}>
+                    <div style={{ color: a.pl>=0?C.green:C.red, fontWeight:700, fontSize:13 }}>{a.pl>=0?"+":"−"}${fmt(Math.abs(a.pl))}</div>
+                    <div style={{ color: a.exp>=0?C.green:C.red, fontSize:10 }}>{a.exp>=0?"+":""}{fmt(a.exp)}R exp</div>
+                  </div>
                 </div>
-                <div style={{ textAlign:"right" }}>
-                  <div style={{ color: a.pl>=0?C.green:C.red, fontWeight:700, fontSize:13 }}>{a.pl>=0?"+":"−"}${fmt(Math.abs(a.pl))}</div>
-                  <div style={{ color: a.exp>=0?C.green:C.red, fontSize:10 }}>{a.exp>=0?"+":""}{fmt(a.exp)}R exp</div>
-                </div>
-              </div>
+                {openAnalyst === a.name && (
+                  <div style={{ paddingLeft:18, paddingBottom:8 }}>
+                    {a.items.map((t) => (
+                      <div key={t.id} onClick={() => editTrade(t.raw)} title="Tap to edit this trade" style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, fontSize:11, padding:"6px 0", borderTop:"1px dashed " + C.line, color:C.dim, cursor:"pointer" }}>
+                        <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                          {t.date} · <b style={{ color: t.calc.dir===1?C.green:C.red }}>{t.calc.dir===1?"LONG":"SHORT"}</b> · {t.raw.lots} lot · {t.raw.style==="scaled" ? t.raw.scaledOutcome : t.raw.outcome}
+                        </span>
+                        <span style={{ flexShrink:0, textAlign:"right", color: t.calc.result>0?C.green:t.calc.result<0?C.red:C.dim }}>
+                          {t.calc.result>=0?"+":"−"}${fmt(Math.abs(t.calc.result))} <span style={{ fontSize:10 }}>({t.calc.rMultiple>=0?"+":""}{fmt(t.calc.rMultiple)}R)</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </React.Fragment>
             ))}
           </div>
         )}
