@@ -8,10 +8,12 @@
   SETUP (one time):
   1. Create a free project at supabase.com
   2. In the SQL editor, run the SQL from the chat (creates trades / withdrawals / settings tables + policies)
-  3. Authentication > Providers > Email: ON.  Authentication > Settings: turn OFF "Allow new users to sign up"
+  3. RUN THIS ONCE to enable the add/remove analyst feature to sync between accounts:
+       alter table settings add column if not exists analysts jsonb default '["Usama","Meower","Other"]'::jsonb;
+  4. Authentication > Providers > Email: ON.  Authentication > Settings: turn OFF "Allow new users to sign up"
      Then add your + Dani's accounts manually under Authentication > Users > Add user.
-  4. Project Settings > API: copy the Project URL and the anon public key into the two lines below.
-  5. Upload this file as index.html to GitHub Pages. Both of you log in and share one journal.
+  5. Project Settings > API: copy the Project URL and the anon public key into the two lines below.
+  6. Upload this file as index.html to GitHub Pages. Both of you log in and share one journal.
 -->
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Archivo:wght@600;800&display=swap');
@@ -50,12 +52,12 @@ const INSTRUMENTS = {
   "GBP/JPY": { pip: 0.01, valuePerLot: 6.7 },
   Custom: { pip: 0.0001, valuePerLot: 10 },
 };
-const ANALYSTS = ["Usama", "Meower", "Other"];
+const DEFAULT_ANALYSTS = ["Usama", "Meower", "Other"];
 const fmt = (n, d = 2) => isFinite(n) ? n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 
 const emptyForm = (pair = "XAU/USD (Gold)", analyst = "Usama") => ({
   date: new Date().toISOString().slice(0, 10), analyst, pair,
-  style: analyst === "Meower" ? "simple" : "scaled",
+  style: "scaled",
   entry: "", sl: "", lots: "", pipValue: INSTRUMENTS[pair].valuePerLot,
   tp: "", outcome: "TP Hit", exit: "",
   riskFree: "", tp1: "", tp2: "", splitA: 50, splitB: 25, splitC: 25, scaledOutcome: "Full", exitS: "", note: "",
@@ -213,6 +215,10 @@ function Login() {
 function TradeJournal({ session, onSignOut }) {
   const [trades, setTrades] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
+  const [analysts, setAnalysts] = useState(DEFAULT_ANALYSTS);
+  const [manageAnalysts, setManageAnalysts] = useState(false);
+  const [newAnalyst, setNewAnalyst] = useState("");
+  const [openWeeks, setOpenWeeks] = useState({});
   const [startBalance, setStartBalance] = useState(2000);
   const [groupBy, setGroupBy] = useState("week");
   const [loading, setLoading] = useState(true);
@@ -233,27 +239,50 @@ function TradeJournal({ session, onSignOut }) {
       ]);
       setTrades((tr.data || []).map((r) => ({ ...r.data, id: r.id })));
       setWithdrawals((wr.data || []).map((r) => ({ ...r.data, id: r.id })));
-      if (st.data) { setStartBalance(st.data.start_balance != null ? Number(st.data.start_balance) : 2000); setGroupBy(st.data.group_by || "week"); }
+      if (st.data) {
+        setStartBalance(st.data.start_balance != null ? Number(st.data.start_balance) : 2000);
+        setGroupBy(st.data.group_by || "week");
+        if (Array.isArray(st.data.analysts) && st.data.analysts.length) setAnalysts(st.data.analysts);
+      }
     } catch (e) { console.error(e); }
     setLoading(false);
   };
   useEffect(() => { fetchAll(); }, []);
-  useEffect(() => { if (!loading) sb.from("settings").upsert({ id: 1, start_balance: startBalance, group_by: groupBy }); }, [startBalance, groupBy, loading]);
+  useEffect(() => {
+    if (loading) return;
+    (async () => {
+      // Try saving with the analyst list. If the "analysts" column does not exist yet
+      // (you haven't run the ALTER TABLE), fall back to saving the rest so nothing breaks.
+      const { error } = await sb.from("settings").upsert({ id: 1, start_balance: startBalance, group_by: groupBy, analysts });
+      if (error) await sb.from("settings").upsert({ id: 1, start_balance: startBalance, group_by: groupBy });
+    })();
+  }, [startBalance, groupBy, analysts, loading]);
 
   const preview = useMemo(() => compute(form), [form]);
   const setField = (k, v) => setForm((f) => {
     const n = { ...f, [k]: v };
     if (k === "pair") n.pipValue = INSTRUMENTS[v].valuePerLot;
-    if (k === "analyst") n.style = v === "Meower" ? "simple" : v === "Usama" ? "scaled" : f.style;
     return n;
   });
+
+  const addAnalyst = (name) => {
+    const n = (name || "").trim();
+    if (!n) return;
+    if (analysts.some((a) => a.toLowerCase() === n.toLowerCase())) return;
+    setAnalysts([...analysts, n]);
+  };
+  const removeAnalyst = (name) => {
+    const count = trades.filter((t) => (t.analyst || "") === name).length;
+    if (count > 0 && !window.confirm(name + " has " + count + " logged trade" + (count !== 1 ? "s" : "") + ". Removing only takes the name off the dropdown — those trades stay in your history and analyst breakdown. Continue?")) return;
+    setAnalysts(analysts.filter((a) => a !== name));
+  };
 
   const saveTrade = async () => {
     if (!compute(form)) return;
     const id = editId || Date.now();
     setSyncing(true);
     await sb.from("trades").upsert({ id, data: { ...form, id } });
-    setEditId(null); setForm(emptyForm(form.pair, form.analyst));
+    setEditId(null); setForm({ ...emptyForm(form.pair, form.analyst), style: form.style });
     await fetchAll(); setSyncing(false);
   };
   const editTrade = (t) => { setForm({ ...emptyForm(t.pair, t.analyst), ...t }); setEditId(t.id); setPane("trade"); window.scrollTo({ top: 0, behavior: "smooth" }); };
@@ -295,8 +324,8 @@ function TradeJournal({ session, onSignOut }) {
     const groups = [...gmap.values()].sort((a, b) => (a.key < b.key ? 1 : -1));
     groups.forEach((g) => g.items.sort((a, b) => (a.date < b.date ? 1 : b.id - a.id)));
     const decided = wins + losses;
-    const analysts = Object.values(byAnalyst).map((a) => ({ ...a, items: [...a.items].sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : y.id - x.id)), winRate: a.w + a.l ? (a.w / (a.w + a.l)) * 100 : 0, exp: a.n ? a.r / a.n : 0 })).sort((a, b) => b.pl - a.pl);
-    return { balance: bal, pl, wins, losses, be, withdrawnTot, depositedTot, winRate: decided ? (wins / decided) * 100 : 0, avgRR: rrCount ? rrSum / rrCount : 0, expectancy: trades.length ? rSum / trades.length : 0, maxDD, maxDDpct: peak ? (maxDD / peak) * 100 : 0, equity, groups, count: trades.length, analysts };
+    const analystStats = Object.values(byAnalyst).map((a) => ({ ...a, items: [...a.items].sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : y.id - x.id)), winRate: a.w + a.l ? (a.w / (a.w + a.l)) * 100 : 0, exp: a.n ? a.r / a.n : 0 })).sort((a, b) => b.pl - a.pl);
+    return { balance: bal, pl, wins, losses, be, withdrawnTot, depositedTot, winRate: decided ? (wins / decided) * 100 : 0, avgRR: rrCount ? rrSum / rrCount : 0, expectancy: trades.length ? rSum / trades.length : 0, maxDD, maxDDpct: peak ? (maxDD / peak) * 100 : 0, equity, groups, count: trades.length, analysts: analystStats };
   }, [trades, withdrawals, startBalance, groupBy]);
 
   const toggle = (k) => setCollapsed((c) => ({ ...c, [k]: !c[k] }));
@@ -317,7 +346,7 @@ function TradeJournal({ session, onSignOut }) {
 
   const fileRef = React.useRef(null);
   const backup = () => {
-    const payload = { trades, withdrawals, settings: { startBalance, groupBy }, exportedAt: new Date().toISOString() };
+    const payload = { trades, withdrawals, settings: { startBalance, groupBy, analysts }, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = "trade-journal-backup.json"; a.click(); URL.revokeObjectURL(url);
   };
@@ -329,7 +358,12 @@ function TradeJournal({ session, onSignOut }) {
       setSyncing(true);
       if (p.trades && p.trades.length) await sb.from("trades").upsert(p.trades.map((t) => ({ id: t.id, data: t })));
       if (p.withdrawals && p.withdrawals.length) await sb.from("withdrawals").upsert(p.withdrawals.map((w) => ({ id: w.id, data: w })));
-      if (p.settings) await sb.from("settings").upsert({ id: 1, start_balance: p.settings.startBalance != null ? p.settings.startBalance : 2000, group_by: p.settings.groupBy || "week" });
+      if (p.settings) {
+        const restored = { id: 1, start_balance: p.settings.startBalance != null ? p.settings.startBalance : 2000, group_by: p.settings.groupBy || "week" };
+        if (Array.isArray(p.settings.analysts)) restored.analysts = p.settings.analysts;
+        const { error } = await sb.from("settings").upsert(restored);
+        if (error) { delete restored.analysts; await sb.from("settings").upsert(restored); }
+      }
       await fetchAll(); setSyncing(false);
       alert("Restore complete — your trades are loaded.");
     } catch (e) { setSyncing(false); alert("Could not read that file: " + e.message); }
@@ -369,7 +403,7 @@ function TradeJournal({ session, onSignOut }) {
 
         {model.analysts.length > 0 && (
           <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:"12px 14px", marginBottom:14 }}>
-            <div style={{ color:C.dim, fontSize:9.5, letterSpacing:"1px", marginBottom:8 }}>BY ANALYST — is each one actually profitable?</div>
+            <div style={{ color:C.dim, fontSize:9.5, letterSpacing:"1px", marginBottom:8 }}>BY ANALYST — is each one actually profitable? <span style={{ color:C.dim }}>(tap a name → weeks)</span></div>
             {model.analysts.map((a) => (
               <React.Fragment key={a.name}>
                 <div onClick={() => setOpenAnalyst(openAnalyst === a.name ? null : a.name)} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"6px 0", borderTop:"1px solid " + C.line, cursor:"pointer" }}>
@@ -385,16 +419,36 @@ function TradeJournal({ session, onSignOut }) {
                 </div>
                 {openAnalyst === a.name && (
                   <div style={{ paddingLeft:18, paddingBottom:8 }}>
-                    {a.items.map((t) => (
-                      <div key={t.id} onClick={() => editTrade(t.raw)} title="Tap to edit this trade" style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, fontSize:11, padding:"6px 0", borderTop:"1px dashed " + C.line, color:C.dim, cursor:"pointer" }}>
-                        <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                          {t.date} · <b style={{ color: t.calc.dir===1?C.green:C.red }}>{t.calc.dir===1?"LONG":"SHORT"}</b> · {t.raw.lots} lot · {t.raw.style==="scaled" ? t.raw.scaledOutcome : t.raw.outcome}
-                        </span>
-                        <span style={{ flexShrink:0, textAlign:"right", color: t.calc.result>0?C.green:t.calc.result<0?C.red:C.dim }}>
-                          {t.calc.result>=0?"+":"−"}${fmt(Math.abs(t.calc.result))} <span style={{ fontSize:10 }}>({t.calc.rMultiple>=0?"+":""}{fmt(t.calc.rMultiple)}R)</span>
-                        </span>
-                      </div>
-                    ))}
+                    {(() => {
+                      const wm = new Map();
+                      a.items.forEach((t) => { const k = periodKey(t.date, "week"); if (!wm.has(k)) wm.set(k, []); wm.get(k).push(t); });
+                      const weeks = [...wm.entries()].map(([k, its]) => ({ key:k, label:periodLabel(k,"week"), items:its, pl:its.reduce((s,x)=>s+x.calc.result,0), w:its.filter(x=>x.calc.result>0).length, l:its.filter(x=>x.calc.result<0).length })).sort((x,y)=> x.key<y.key?1:-1);
+                      return weeks.map((wk) => {
+                        const wkKey = a.name + "|" + wk.key, wkOpen = openWeeks[wkKey] !== false, wpc = wk.pl>0?C.green:wk.pl<0?C.red:C.dim;
+                        return (
+                          <div key={wk.key} style={{ marginBottom:2 }}>
+                            <div onClick={() => setOpenWeeks((o) => ({ ...o, [wkKey]: o[wkKey] === false ? true : false }))} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, padding:"5px 0", borderTop:"1px solid " + C.line, cursor:"pointer" }}>
+                              <div style={{ display:"flex", alignItems:"center", gap:6, minWidth:0 }}>
+                                <span style={{ color:C.dim, fontSize:9, transform: wkOpen?"rotate(90deg)":"none", transition:"transform .15s" }}>▶</span>
+                                <span style={{ fontSize:11, color:C.text, whiteSpace:"nowrap" }}>{wk.label}</span>
+                                <span style={{ fontSize:10, color:C.dim }}><span style={{color:C.green}}>{wk.w}W</span> <span style={{color:C.red}}>{wk.l}L</span></span>
+                              </div>
+                              <span style={{ fontSize:11, fontWeight:700, color:wpc, flexShrink:0 }}>{wk.pl>=0?"+":"−"}${fmt(Math.abs(wk.pl))}</span>
+                            </div>
+                            {wkOpen && wk.items.map((t) => (
+                              <div key={t.id} onClick={() => editTrade(t.raw)} title="Tap to edit this trade" style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, fontSize:11, padding:"6px 0 6px 14px", borderTop:"1px dashed " + C.line, color:C.dim, cursor:"pointer" }}>
+                                <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                  {t.date} · <b style={{ color: t.calc.dir===1?C.green:C.red }}>{t.calc.dir===1?"LONG":"SHORT"}</b> · {t.raw.lots} lot · {t.raw.style==="scaled" ? t.raw.scaledOutcome : t.raw.outcome}
+                                </span>
+                                <span style={{ flexShrink:0, textAlign:"right", color: t.calc.result>0?C.green:t.calc.result<0?C.red:C.dim }}>
+                                  {t.calc.result>=0?"+":"−"}${fmt(Math.abs(t.calc.result))} <span style={{ fontSize:10 }}>({t.calc.rMultiple>=0?"+":""}{fmt(t.calc.rMultiple)}R)</span>
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      });
+                    })()}
                   </div>
                 )}
               </React.Fragment>
@@ -412,11 +466,34 @@ function TradeJournal({ session, onSignOut }) {
         {pane === "trade" && (
           <div style={{ background:C.panel, border:"1px solid " + C.line, borderRadius:10, padding:14, marginBottom:16 }}>
             <Row><Field label="DATE"><input type="date" value={form.date} onChange={(e) => setField("date", e.target.value)} style={inp()} /></Field>
-              <Field label="ANALYST"><select value={form.analyst} onChange={(e) => setField("analyst", e.target.value)} style={inp()}>{ANALYSTS.map((a) => <option key={a}>{a}</option>)}</select></Field></Row>
+              <Field label="ANALYST"><select value={form.analyst} onChange={(e) => setField("analyst", e.target.value)} style={inp()}>{(analysts.includes(form.analyst) ? analysts : [...analysts, form.analyst]).map((a) => <option key={a}>{a}</option>)}</select></Field></Row>
+
+            <div style={{ marginTop:-4, marginBottom:10 }}>
+              <button onClick={() => setManageAnalysts((v) => !v)} style={{ background:"transparent", border:"none", color:C.blue, fontSize:10.5, padding:0, cursor:"pointer", letterSpacing:"0.5px" }}>{manageAnalysts ? "− hide analyst manager" : "+ add / remove analyst"}</button>
+              {manageAnalysts && (
+                <div style={{ marginTop:8, padding:10, background:C.bg, border:"1px solid " + C.line, borderRadius:6 }}>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:8 }}>
+                    {analysts.map((a) => (
+                      <span key={a} style={{ display:"inline-flex", alignItems:"center", gap:6, background:C.panel2, border:"1px solid " + C.line, borderRadius:20, padding:"4px 6px 4px 10px", fontSize:11 }}>
+                        {a}
+                        <span onClick={() => removeAnalyst(a)} title="remove from dropdown (keeps trades)" style={{ cursor:"pointer", color:C.red, fontSize:14, lineHeight:1 }}>×</span>
+                      </span>
+                    ))}
+                    {analysts.length === 0 && <span style={{ color:C.dim, fontSize:11 }}>No analysts yet — add one below.</span>}
+                  </div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    <input value={newAnalyst} onChange={(e) => setNewAnalyst(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { addAnalyst(newAnalyst); setNewAnalyst(""); } }} placeholder="new analyst name" style={{ ...inp(), flex:1 }} />
+                    <button onClick={() => { addAnalyst(newAnalyst); setNewAnalyst(""); }} style={{ background:C.blue, color:"#04223a", border:"none", padding:"0 16px", borderRadius:6, fontWeight:700, fontSize:12 }}>ADD</button>
+                  </div>
+                  <div style={{ color:C.dim, fontSize:9.5, marginTop:8, lineHeight:1.5 }}>Removing a name only takes it off this dropdown. Past trades and their analyst breakdown stay. Requires the one-time SQL column to sync with Dani.</div>
+                </div>
+              )}
+            </div>
+
             <Row><Field label="PAIR"><select value={form.pair} onChange={(e) => setField("pair", e.target.value)} style={inp()}>{Object.keys(INSTRUMENTS).map((k) => <option key={k}>{k}</option>)}</select></Field>
               <Field label="STYLE">
                 <div style={{ display:"flex", gap:4, background:C.bg, border:"1px solid " + C.line, borderRadius:6, padding:3 }}>
-                  {["simple","scaled"].map((s) => <button key={s} onClick={() => setField("style", s)} style={{ flex:1, background: form.style===s?C.panel2:"transparent", color: form.style===s?C.text:C.dim, border:"none", padding:"6px", borderRadius:4, fontSize:11, fontWeight: form.style===s?700:400 }}>{s==="simple"?"Simple (Meower)":"Scaled (Usama)"}</button>)}
+                  {["simple","scaled"].map((s) => <button key={s} onClick={() => setField("style", s)} style={{ flex:1, background: form.style===s?C.panel2:"transparent", color: form.style===s?C.text:C.dim, border:"none", padding:"6px", borderRadius:4, fontSize:11, fontWeight: form.style===s?700:400 }}>{s==="simple"?"Simple":"TP1 & TP2"}</button>)}
                 </div>
               </Field></Row>
             <Row><Field label="ENTRY"><input type="number" step="any" value={form.entry} onChange={(e) => setField("entry", e.target.value)} placeholder="4500.00" style={inp()} /></Field>
