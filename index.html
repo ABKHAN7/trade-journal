@@ -488,7 +488,7 @@ function TradeJournal({ session, onSignOut }) {
 
         {model.equity.length > 1 && <Equity data={model.equity} start={startBalance} />}
 
-        <div style={wide ? { display:"flex", gap:16, alignItems:"flex-start" } : undefined}>
+        <div style={wide ? { display:"flex", flexDirection:"row-reverse", gap:16, alignItems:"flex-start" } : undefined}>
         <div style={wide ? { flex:"0 0 400px", minWidth:0 } : undefined}>
 
         <div style={{ display:"flex", gap:8, marginBottom: pane ? 8 : 14 }}>
@@ -614,8 +614,8 @@ function TradeJournal({ session, onSignOut }) {
                 <span style={{ color:C.dim, fontSize:12, transform: isOpen ? "rotate(90deg)" : "none", transition:"transform .15s" }}>▶</span>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontWeight:700, fontSize:13 }}>{g.label}</div>
-                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>{g.trades} trade{g.trades!==1?"s":""} · <span style={{ color:C.green }}>{g.wins}W</span> <span style={{ color:C.red }}>{g.losses}L</span>{g.be?" " + g.be + "BE":""}{g.deposited>0 && <span style={{ color:C.green }}> · ⤒ ${fmt(g.deposited,0)}</span>}{g.withdrawn>0 && <span style={{ color:C.amber }}> · ⤓ ${fmt(g.withdrawn,0)}</span>}</div>
-                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>open <b style={{ color:C.text }}>${fmt(g.openBal)}</b> → close <b style={{ color: g.closeBal>=g.openBal?C.green:C.red }}>${fmt(g.closeBal)}</b></div>
+                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>{g.trades} trade{g.trades!==1?"s":""} · <span style={{ color:C.green }}>{g.wins}W</span> <span style={{ color:C.red }}>{g.losses}L</span>{g.be?" " + g.be + "BE":""}</div>
+                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>open <b style={{ color:C.text }}>${fmt(g.openBal)}</b> → close <b style={{ color: g.closeBal>=g.openBal?C.green:C.red }}>${fmt(g.closeBal)}</b>{g.deposited>0 && <span style={{ color:C.green }}> · ⤒ ${fmt(g.deposited,0)} in</span>}{g.withdrawn>0 && <span style={{ color:C.amber }}> · ⤓ ${fmt(g.withdrawn,0)} out</span>}</div>
                 </div>
                 <div style={{ textAlign:"right" }}>
                   <div style={{ color:pc, fontWeight:700, fontSize:14 }}>{g.pl >= 0 ? "+" : "−"}${fmt(Math.abs(g.pl))}</div>
