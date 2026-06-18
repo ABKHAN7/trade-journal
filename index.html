@@ -102,6 +102,23 @@ function compute(t) {
   else if (t.outcome === "Manual") { const ex = parseFloat(t.exit); if (isFinite(ex)) result = ((ex - entry) / inst.pip) * dir * pv * lots; }
   return { dir, riskPips, dollarRisk, dollarReward, result, rMultiple: dollarRisk > 0 ? result / dollarRisk : 0, plannedRR, slValid, scaled: false };
 }
+// Price the trade was effectively closed at. Scaled trades exit in pieces, so this
+// returns the FINAL leg's level (TP2 on a full win, SL on a full loss, etc.).
+function closedPrice(t) {
+  if (t.style === "scaled") {
+    if (t.scaledOutcome === "Full SL") return t.sl;
+    if (t.scaledOutcome === "Manual") return t.exitS;
+    if (t.scaledOutcome === "Full") return t.tp2;
+    if (t.scaledOutcome === "TP1") return t.tp1;
+    if (t.scaledOutcome === "Risk-free") return t.riskFree;
+    return "";
+  }
+  if (t.outcome === "TP Hit") return t.tp;
+  if (t.outcome === "SL Hit") return t.sl;
+  if (t.outcome === "Breakeven") return t.entry;
+  if (t.outcome === "Manual") return t.exit;
+  return "";
+}
 function periodKey(dateStr, mode) {
   const d = new Date(dateStr + "T00:00:00");
   if (mode === "day") return dateStr;
@@ -145,7 +162,7 @@ function TradeCard({ e, onEdit, onDel }) {
         </div>
       </div>
       <div style={{ display:"flex", flexWrap:"wrap", gap:"2px 14px", fontSize:11, color:C.dim }}>
-        <span>E {t.entry}</span><span>SL {t.sl}</span>
+        <span>E {t.entry}</span><span style={{ color:rc }}>→ close {closedPrice(t)}</span><span>SL {t.sl}</span>
         {c.scaled ? <React.Fragment><span>RF {t.riskFree}</span><span>TP1 {t.tp1}</span><span>TP2 {t.tp2}</span><span>{t.splitA}/{t.splitB}/{t.splitC}</span></React.Fragment> : <span>TP {t.tp}</span>}
         <span>{t.lots} lot</span><span>1:{fmt(c.plannedRR)}</span><span>risk ${fmt(c.dollarRisk)}</span>
         <span style={{ color:rc }}>{c.scaled ? t.scaledOutcome : t.outcome}</span>
@@ -229,6 +246,13 @@ function TradeJournal({ session, onSignOut }) {
   const [wd, setWd] = useState({ date: new Date().toISOString().slice(0, 10), amount: "", note: "", type: "deposit" });
   const [pane, setPane] = useState("trade");
   const [editId, setEditId] = useState(null);
+  const [vw, setVw] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
+  useEffect(() => {
+    const onResize = () => setVw(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const wide = vw >= 1100; // two-column desktop layout above this width; below it stays as the mobile layout
 
   const fetchAll = async () => {
     try {
@@ -300,7 +324,7 @@ function TradeJournal({ session, onSignOut }) {
     const equity = [{ x: 0, y: startBalance }], gmap = new Map(); const byAnalyst = {};
     events.forEach((e, i) => {
       const before = bal, key = periodKey(e.date, groupBy);
-      if (!gmap.has(key)) gmap.set(key, { key, label: periodLabel(key, groupBy), items: [], trades: 0, wins: 0, losses: 0, be: 0, pl: 0, withdrawn: 0, deposited: 0, openBal: before });
+      if (!gmap.has(key)) gmap.set(key, { key, label: periodLabel(key, groupBy), items: [], trades: 0, wins: 0, losses: 0, be: 0, pl: 0, withdrawn: 0, deposited: 0, openBal: before, closeBal: before });
       const g = gmap.get(key);
       if (e.kind === "trade") {
         const c = e.calc;
@@ -319,6 +343,7 @@ function TradeJournal({ session, onSignOut }) {
       } else if (e.raw.type === "deposit") { bal += e.raw.amount; depositedTot += e.raw.amount; g.deposited += e.raw.amount; }
       else { bal -= e.raw.amount; withdrawnTot += e.raw.amount; g.withdrawn += e.raw.amount; }
       g.items.push({ ...e, balanceAfter: bal });
+      g.closeBal = bal; // updated on every event; chronological order means the last write is the period's closing balance
       equity.push({ x: i + 1, y: bal });
     });
     const groups = [...gmap.values()].sort((a, b) => (a.key < b.key ? 1 : -1));
@@ -375,7 +400,7 @@ function TradeJournal({ session, onSignOut }) {
 
   return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'JetBrains Mono', ui-monospace, monospace", padding:"16px 12px 60px" }}>
-      <div style={{ maxWidth:720, margin:"0 auto" }}>
+      <div style={{ maxWidth: wide ? 1180 : 720, margin:"0 auto" }}>
         <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:6, flexWrap:"wrap", gap:8 }}>
           <div>
             <div style={{ fontFamily:"Archivo, sans-serif", fontWeight:800, fontSize:26, letterSpacing:"-0.5px" }}>TRADE<span style={{ color:C.amber }}>·</span>JOURNAL</div>
@@ -392,7 +417,7 @@ function TradeJournal({ session, onSignOut }) {
           <button onClick={onSignOut} style={{ background:"transparent", border:"1px solid " + C.line, color:C.dim, padding:"4px 10px", borderRadius:6, fontSize:11 }}>Sign out</button>
         </div>
 
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8, marginBottom:14 }}>
+        <div style={{ display:"grid", gridTemplateColumns: wide ? "repeat(3,1fr)" : "repeat(2,1fr)", gap:8, marginBottom:14 }}>
           <Stat label="BALANCE" value={"$" + fmt(model.balance)} sub={"start $" + fmt(startBalance,0) + " · in $" + fmt(model.depositedTot,0) + " · out $" + fmt(model.withdrawnTot,0)} color={model.balance >= startBalance ? C.green : C.red} big />
           <Stat label="NET TRADING P/L" value={(model.pl >= 0 ? "+" : "−") + "$" + fmt(Math.abs(model.pl))} color={model.pl >= 0 ? C.green : C.red} big />
           <Stat label="WIN RATE" value={fmt(model.winRate,1) + "%"} sub={model.wins + "W · " + model.losses + "L · " + model.be + "BE"} color={C.text} />
@@ -437,9 +462,14 @@ function TradeJournal({ session, onSignOut }) {
                             </div>
                             {wkOpen && wk.items.map((t) => (
                               <div key={t.id} onClick={() => editTrade(t.raw)} title="Tap to edit this trade" style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, fontSize:11, padding:"6px 0 6px 14px", borderTop:"1px dashed " + C.line, color:C.dim, cursor:"pointer" }}>
-                                <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                                  {t.date} · <b style={{ color: t.calc.dir===1?C.green:C.red }}>{t.calc.dir===1?"LONG":"SHORT"}</b> · {t.raw.lots} lot · {t.raw.style==="scaled" ? t.raw.scaledOutcome : t.raw.outcome}
-                                </span>
+                                <div style={{ minWidth:0 }}>
+                                  <div style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                    {t.date} · <b style={{ color: t.calc.dir===1?C.green:C.red }}>{t.calc.dir===1?"LONG":"SHORT"}</b> · {t.raw.lots} lot · {t.raw.style==="scaled" ? t.raw.scaledOutcome : t.raw.outcome}
+                                  </div>
+                                  <div style={{ fontSize:10, color:C.dim, marginTop:1, whiteSpace:"nowrap" }}>
+                                    E {t.raw.entry} <span style={{ color: t.calc.result>0?C.green:t.calc.result<0?C.red:C.dim }}>→ {closedPrice(t.raw)}</span>
+                                  </div>
+                                </div>
                                 <span style={{ flexShrink:0, textAlign:"right", color: t.calc.result>0?C.green:t.calc.result<0?C.red:C.dim }}>
                                   {t.calc.result>=0?"+":"−"}${fmt(Math.abs(t.calc.result))} <span style={{ fontSize:10 }}>({t.calc.rMultiple>=0?"+":""}{fmt(t.calc.rMultiple)}R)</span>
                                 </span>
@@ -457,6 +487,9 @@ function TradeJournal({ session, onSignOut }) {
         )}
 
         {model.equity.length > 1 && <Equity data={model.equity} start={startBalance} />}
+
+        <div style={wide ? { display:"flex", gap:16, alignItems:"flex-start" } : undefined}>
+        <div style={wide ? { flex:"0 0 400px", minWidth:0 } : undefined}>
 
         <div style={{ display:"flex", gap:8, marginBottom: pane ? 8 : 14 }}>
           <button onClick={() => setPane(pane === "trade" ? null : "trade")} style={{ flex:1, background: pane==="trade"?C.panel:C.panel2, border:"1px solid " + (pane==="trade"?C.blue:C.line), color:C.text, padding:"10px", borderRadius:8, fontSize:13, fontWeight:700 }}>{editId ? "▲ EDIT TRADE" : "＋ TRADE"}</button>
@@ -555,6 +588,9 @@ function TradeJournal({ session, onSignOut }) {
           );
         })()}
 
+        </div>
+        <div style={wide ? { flex:1, minWidth:0 } : undefined}>
+
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
           <div style={{ display:"flex", gap:4, background:C.panel, border:"1px solid " + C.line, borderRadius:8, padding:3 }}>
             {["day","week","month"].map((m) => <button key={m} onClick={() => setGroupBy(m)} style={{ background: groupBy===m?C.panel2:"transparent", color: groupBy===m?C.text:C.dim, border:"none", padding:"6px 12px", borderRadius:6, fontSize:11, fontWeight: groupBy===m?700:400 }}>{m.toUpperCase()}</button>)}
@@ -579,6 +615,7 @@ function TradeJournal({ session, onSignOut }) {
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontWeight:700, fontSize:13 }}>{g.label}</div>
                   <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>{g.trades} trade{g.trades!==1?"s":""} · <span style={{ color:C.green }}>{g.wins}W</span> <span style={{ color:C.red }}>{g.losses}L</span>{g.be?" " + g.be + "BE":""}{g.deposited>0 && <span style={{ color:C.green }}> · ⤒ ${fmt(g.deposited,0)}</span>}{g.withdrawn>0 && <span style={{ color:C.amber }}> · ⤓ ${fmt(g.withdrawn,0)}</span>}</div>
+                  <div style={{ color:C.dim, fontSize:10.5, marginTop:1 }}>open <b style={{ color:C.text }}>${fmt(g.openBal)}</b> → close <b style={{ color: g.closeBal>=g.openBal?C.green:C.red }}>${fmt(g.closeBal)}</b></div>
                 </div>
                 <div style={{ textAlign:"right" }}>
                   <div style={{ color:pc, fontWeight:700, fontSize:14 }}>{g.pl >= 0 ? "+" : "−"}${fmt(Math.abs(g.pl))}</div>
@@ -589,6 +626,9 @@ function TradeJournal({ session, onSignOut }) {
             </div>
           );
         })}
+
+        </div>
+        </div>
 
         <div style={{ color:C.dim, fontSize:10, lineHeight:1.6, marginTop:24, borderTop:"1px solid " + C.line, paddingTop:12 }}>
           Shared cloud journal — you and Dani see the same trades from any device. Tap ↻ Sync to pull the latest after the other person logs a trade. Export CSV regularly as a backup.
